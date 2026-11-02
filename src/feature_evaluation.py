@@ -6,22 +6,40 @@ import numpy as np
 import pandas as pd
 
 
+# --------------------------------------------------
+# Paths and configuration
+# --------------------------------------------------
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "Data"
+PROCESSED_DIR = DATA_DIR / "processed"
 
-INPUT_FILE = (
-    DATA_DIR / "processed" / "features_1st_test_all.csv"
-)
+DATASETS = ["1st_test", "2nd_test", "3rd_test"]
 
-OUTPUT_FILE = (
-    DATA_DIR / "processed" / "feature_quality_1st_test.csv"
-)
+CHANNELS = {
+    "1st_test": [
+        "Bx_1", "By_1", "Bx_2", "By_2",
+        "Bx_3", "By_3", "Bx_4", "By_4"
+    ],
+    "2nd_test": ["B1", "B2", "B3", "B4"],
+    "3rd_test": ["B1", "B2", "B3", "B4"]
+}
 
-# Only these bearings reached confirmed failure in IMS Set 1.
-FAILED_BEARINGS = [3, 4]
+# Current confirmed-failure assumptions.
+FAILED_BEARINGS = {
+    "1st_test": [3, 4],
+    "2nd_test": [1],
+    "3rd_test": [3]
+}
 
+ROBUSTNESS_WINDOW = 21
+
+
+# --------------------------------------------------
+# 1. Monotonicity
+# --------------------------------------------------
 
 def calculate_monotonicity(values):
-    """Directional consistency, from 0 to 1."""
+    """Directional consistency, ranging from 0 to 1."""
 
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
@@ -34,21 +52,22 @@ def calculate_monotonicity(values):
     increasing = np.sum(differences > 0)
     decreasing = np.sum(differences < 0)
 
-    return abs(increasing - decreasing) / (len(values) - 1)
+    return float(
+        abs(increasing - decreasing) / (len(values) - 1)
+    )
 
 
-def calculate_robustness(values, window=21):
-    """Measure how closely a feature follows its smoothed trend."""
+# --------------------------------------------------
+# 2. Robustness
+# --------------------------------------------------
+
+def calculate_robustness(values, window=ROBUSTNESS_WINDOW):
+    """Measure robustness using mean normalized residuals."""
 
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
 
     if len(values) < 5:
-        return np.nan
-
-    overall_variation = np.std(values)
-
-    if overall_variation < 1e-12:
         return np.nan
 
     series = pd.Series(values)
@@ -60,15 +79,30 @@ def calculate_robustness(values, window=21):
     ).median()
 
     deviations = (series - smoothed).dropna()
+    trend = smoothed.dropna()
 
-    if deviations.empty:
+    valid = trend.index[
+        series.loc[trend.index].abs() > 1e-12
+    ]
+
+    if len(valid) == 0:
         return np.nan
 
-    fluctuation = np.std(deviations)
-    robustness = np.exp(-fluctuation / overall_variation)
+    original = series.loc[valid]
+    residuals = deviations.loc[valid]
+
+    normalized_residuals = (
+        residuals.abs() / original.abs()
+    )
+
+    robustness = np.exp(-normalized_residuals).mean()
 
     return float(robustness)
 
+
+# --------------------------------------------------
+# 3. Pearson correlation
+# --------------------------------------------------
 
 def calculate_pearson_correlation(values_a, values_b):
     """Pearson correlation between two feature trajectories."""
@@ -76,7 +110,11 @@ def calculate_pearson_correlation(values_a, values_b):
     a = np.asarray(values_a, dtype=float)
     b = np.asarray(values_b, dtype=float)
 
+    if len(a) != len(b):
+        return np.nan
+
     valid = np.isfinite(a) & np.isfinite(b)
+
     a = a[valid]
     b = b[valid]
 
@@ -89,22 +127,82 @@ def calculate_pearson_correlation(values_a, values_b):
     return float(np.corrcoef(a, b)[0, 1])
 
 
-def calculate_trendability(features, axis, feature_name):
-    """Calculate trendability for the confirmed-failure bearings."""
+# --------------------------------------------------
+# 4. Identify channels and feature names
+# --------------------------------------------------
 
-    columns = [
-        f"{axis}_{bearing}_{feature_name}"
-        for bearing in FAILED_BEARINGS
-    ]
+def identify_channel_and_feature(column, channels):
 
-    columns = [
-        column for column in columns
-        if column in features.columns
-    ]
+    for channel in sorted(channels, key=len, reverse=True):
+
+        prefix = channel + "_"
+
+        if column.startswith(prefix):
+            feature_name = column[len(prefix):]
+            return channel, feature_name
+
+    return None, None
+
+
+def get_bearing_number(channel):
+
+    if "_" in channel:
+        return int(channel.split("_")[-1])
+
+    return int(channel[1:])
+
+
+def get_sensor_group(channel):
+
+    if channel.startswith("Bx_"):
+        return "Bx"
+
+    if channel.startswith("By_"):
+        return "By"
+
+    return "B"
+
+
+# --------------------------------------------------
+# 5. Trendability
+# --------------------------------------------------
+
+def calculate_trendability(
+    features,
+    feature_name,
+    sensor_group,
+    channels,
+    failed_bearings
+):
+    """
+    Compare the same feature across confirmed-failure
+    bearings belonging to the same sensor group.
+    """
+
+    columns = []
+
+    for channel in channels:
+
+        bearing_number = get_bearing_number(channel)
+
+        if bearing_number not in failed_bearings:
+            continue
+
+        if get_sensor_group(channel) != sensor_group:
+            continue
+
+        column = f"{channel}_{feature_name}"
+
+        if column in features.columns:
+            columns.append(column)
+
+    if len(columns) < 2:
+        return np.nan, np.nan
 
     correlations = []
 
     for column_a, column_b in combinations(columns, 2):
+
         correlation = calculate_pearson_correlation(
             features[column_a],
             features[column_b]
@@ -117,115 +215,139 @@ def calculate_trendability(features, axis, feature_name):
         return np.nan, np.nan
 
     trendability = min(abs(r) for r in correlations)
+
     direction_agreement = np.mean(
         [r > 0 for r in correlations]
     )
 
-    return trendability, direction_agreement
+    return float(trendability), float(direction_agreement)
 
 
-def evaluate_features(features):
-    results = []
+# --------------------------------------------------
+# 6. Evaluate features
+# --------------------------------------------------
 
-    excluded = {"timestamp", "recording"}
+def evaluate_features(features, dataset_name):
+
+    channels = CHANNELS[dataset_name]
+    failed_bearings = FAILED_BEARINGS[dataset_name]
+
+    excluded = {
+        "timestamp",
+        "recording",
+        "recording_index",
+        "dataset"
+    }
 
     feature_columns = [
-        column for column in features.columns
+        column
+        for column in features.columns
         if column not in excluded
         and pd.api.types.is_numeric_dtype(features[column])
     ]
 
-    trendability_scores = {}
+    results = []
 
     for column in feature_columns:
-        parts = column.split("_", 2)
 
-        if len(parts) != 3:
+        channel, feature_name = identify_channel_and_feature(
+            column,
+            channels
+        )
+
+        if channel is None:
             continue
 
-        axis, bearing_number, feature_name = parts
-
-        if axis not in {"Bx", "By"}:
-            continue
-
-        key = (axis, feature_name)
-
-        if key not in trendability_scores:
-            trendability_scores[key] = calculate_trendability(
-                features,
-                axis,
-                feature_name
-            )
-
-    for column in feature_columns:
         values = features[column].to_numpy(dtype=float)
-        parts = column.split("_", 2)
 
-        if len(parts) == 3:
-            axis, bearing_number, feature_name = parts
+        sensor_group = get_sensor_group(channel)
 
-            trendability, direction_agreement = (
-                trendability_scores.get(
-                    (axis, feature_name),
-                    (np.nan, np.nan)
-                )
+        trendability, direction_agreement = (
+            calculate_trendability(
+                features,
+                feature_name,
+                sensor_group,
+                channels,
+                failed_bearings
             )
-        else:
-            trendability = np.nan
+        )
 
         results.append({
+            "channel": channel,
+            "feature_name": feature_name,
             "feature": column,
             "monotonicity": calculate_monotonicity(values),
             "trendability": trendability,
+            "direction_agreement": direction_agreement,
             "robustness": calculate_robustness(values)
         })
 
     results = pd.DataFrame(results)
 
-    # Sort by channel: Bx_1, By_1, Bx_2, By_2, etc.
+    if results.empty:
+        raise ValueError(
+            f"No valid feature columns found in {dataset_name}."
+        )
+
     channel_order = {
-        "Bx_1": 1,
-        "By_1": 2,
-        "Bx_2": 3,
-        "By_2": 4,
-        "Bx_3": 5,
-        "By_3": 6,
-        "Bx_4": 7,
-        "By_4": 8
+        channel: index
+        for index, channel in enumerate(channels)
     }
 
-    results["channel_order"] = results["feature"].apply(
-        lambda name: channel_order.get(
-            "_".join(name.split("_")[:2]),
-            999
-        )
+    results["channel_order"] = results["channel"].map(
+        channel_order
     )
 
     results = results.sort_values(
-        ["channel_order", "feature"]
-    ).drop(columns="channel_order")
+        ["channel_order", "feature_name"]
+    )
 
-    return results
+    results = results.drop(columns="channel_order")
+
+    return results.reset_index(drop=True)
+
+
+# --------------------------------------------------
+# 7. Process all experiments
+# --------------------------------------------------
+
+def main():
+
+    for dataset_name in DATASETS:
+
+        print("\n====================================")
+        print(f"Feature evaluation: {dataset_name}")
+        print("====================================")
+
+        dataset_dir = PROCESSED_DIR / dataset_name
+
+        input_file = dataset_dir / "features_all.csv"
+        output_file = dataset_dir / "feature_quality.csv"
+
+        if not input_file.exists():
+            print(f"File not found: {input_file}")
+            print("Skipping dataset.")
+            continue
+
+        features = pd.read_csv(input_file)
+
+        results = evaluate_features(
+            features,
+            dataset_name
+        )
+
+        results.to_csv(
+            output_file,
+            index=False,
+            float_format="%.3f"
+        )
+
+        print("\nFeature quality results:")
+        print(results.to_string(index=False))
+
+        print(f"\nSaved results to: {output_file}")
 
 
 if __name__ == "__main__":
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(
-            f"Feature table not found: {INPUT_FILE}\n"
-            "Run feature_analysis.py first."
-        )
+    main()
 
-    features = pd.read_csv(INPUT_FILE)
-
-    results = evaluate_features(features)
-
-    results.to_csv(
-        OUTPUT_FILE,
-        index=False,
-        float_format="%.3f"
-    )
-
-    print("\nFeature quality results:")
-    print(results.to_string(index=False))
-
-    print(f"\nSaved results to: {OUTPUT_FILE}")

@@ -1,53 +1,234 @@
+
+# data_loader.py
+
 from pathlib import Path
+from datetime import datetime
+
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
+# ============================================================
+# Paths
+# ============================================================
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "Data"
-OUTPUT_DIR = DATA_DIR / "processed"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+PROCESSED_DIR = DATA_DIR / "processed"
+
+
+# ============================================================
+# Dataset channel configuration
+# ============================================================
 
 CHANNEL_NAMES = {
+
     "1st_test": [
-        "Bx_1", "By_1", "Bx_2", "By_2",
-        "Bx_3", "By_3", "Bx_4", "By_4"
+        "Bx_1", "By_1",
+        "Bx_2", "By_2",
+        "Bx_3", "By_3",
+        "Bx_4", "By_4"
     ],
-    "2nd_test": ["Bx_1", "By_1", "Bx_2", "By_2"],
-    "3rd_test": ["Bx_1", "By_1", "Bx_2", "By_2"]
+
+    "2nd_test": [
+        "B1", "B2", "B3", "B4"
+    ],
+
+    "3rd_test": [
+        "B1", "B2", "B3", "B4"
+    ]
 }
 
 
+# ============================================================
+# Recording discovery
+# ============================================================
+
+def get_recording_files(dataset_name):
+
+    if dataset_name not in CHANNEL_NAMES:
+        raise ValueError(
+            f"Unknown dataset: {dataset_name}"
+        )
+
+    folder = DATA_DIR / dataset_name
+
+    if not folder.exists():
+        raise FileNotFoundError(
+            f"Dataset folder not found: {folder}"
+        )
+
+    # Preserve the existing directory order.
+    files = [
+        f for f in folder.iterdir()
+        if f.is_file()
+    ]
+
+    if not files:
+        raise FileNotFoundError(
+            f"No recordings found in: {folder}"
+        )
+
+    # Check that filenames represent chronological recordings.
+    timestamps = []
+
+    for file in files:
+
+        try:
+            timestamp = datetime.strptime(
+                file.name,
+                "%Y.%m.%d.%H.%M.%S"
+            )
+
+        except ValueError:
+            raise ValueError(
+                f"Unexpected recording filename: {file.name}"
+            )
+
+        timestamps.append(timestamp)
+
+    if any(
+        timestamps[i] > timestamps[i + 1]
+        for i in range(len(timestamps) - 1)
+    ):
+        raise ValueError(
+            f"Recordings in {dataset_name} are not chronological. "
+            "Check their directory order before processing."
+        )
+
+    return files
+
+
+# ============================================================
+# Load one recording
+# ============================================================
+
 def load_recording(dataset_name, filename):
+
+    if dataset_name not in CHANNEL_NAMES:
+        raise ValueError(
+            f"Unknown dataset: {dataset_name}"
+        )
+
     file_path = DATA_DIR / dataset_name / filename
 
-    dataset = pd.read_csv(file_path, sep="\t", header=None)
-    dataset.columns = CHANNEL_NAMES[dataset_name]
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Recording not found: {file_path}"
+        )
+
+    # IMS files are tab-separated and have no header.
+    dataset = pd.read_csv(
+        file_path,
+        sep="\t",
+        header=None
+    )
+
+    expected_channels = CHANNEL_NAMES[dataset_name]
+
+    if dataset.shape[1] != len(expected_channels):
+        raise ValueError(
+            f"{filename}: expected {len(expected_channels)} "
+            f"channels, but found {dataset.shape[1]}."
+        )
+
+    dataset.columns = expected_channels
+
+    # Ensure all measurements are numeric.
+    dataset = dataset.apply(
+        pd.to_numeric,
+        errors="raise"
+    )
 
     return dataset
 
 
-if __name__ == "__main__":
-    # Load the first recording from 3rd_test
-    folder = DATA_DIR / "3rd_test"
-    first_file = next(f for f in folder.iterdir() if f.is_file())
+# ============================================================
+# Inspect and visualize each dataset
+# ============================================================
 
-    dataset = load_recording("3rd_test", first_file.name)
+def inspect_dataset(dataset_name):
 
-    # Save the table with column names
-    csv_path = OUTPUT_DIR / "test3.csv"
-    dataset.to_csv(csv_path, index=False)
-    print(f"Table saved to: {csv_path}")
+    files = get_recording_files(dataset_name)
 
-    # Plot and save the figure
-    ax = dataset.plot(figsize=(14, 5), title="Bearing Vibration")
+    first_file = files[0]
+
+    dataset = load_recording(
+        dataset_name,
+        first_file.name
+    )
+
+    output_dir = (
+        PROCESSED_DIR /
+        dataset_name /
+        "data_inspection"
+    )
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # Save first recording as a CSV table.
+    csv_path = output_dir / "first_recording.csv"
+
+    dataset.to_csv(
+        csv_path,
+        index=False
+    )
+
+    # Plot the vibration signals.
+    ax = dataset.plot(
+        figsize=(14, 5),
+        title=f"Bearing Vibration - {dataset_name}"
+    )
+
     ax.set(
         xlabel="Sample index",
         ylabel="Vibration / acceleration (g)"
     )
 
     plt.tight_layout()
-    plot_path = OUTPUT_DIR / "vibrationpercycle3.png"
-    plt.savefig(plot_path, dpi=150)
-    plt.show()
 
-    print(f"Plot saved to: {plot_path}")
+    plot_path = output_dir / "first_recording_vibration.png"
 
+    plt.savefig(
+        plot_path,
+        dpi=150
+    )
+
+    plt.close()
+
+    # Dataset information.
+    print("\n" + "=" * 60)
+    print(f"DATASET: {dataset_name}")
+    print("=" * 60)
+
+    print("Total recordings:", len(files))
+    print("First recording:", files[0].name)
+    print("Last recording:", files[-1].name)
+
+    print("Number of channels:", dataset.shape[1])
+    print("Samples per channel:", dataset.shape[0])
+
+    print("Channels:", dataset.columns.tolist())
+
+    print("First recording saved:", csv_path)
+    print("Vibration plot saved:", plot_path)
+
+
+# ============================================================
+# Main
+# ============================================================
+
+if __name__ == "__main__":
+
+    for dataset_name in [
+        "1st_test",
+        "2nd_test",
+        "3rd_test"
+    ]:
+
+        inspect_dataset(dataset_name)
+
+    print("\nAll datasets inspected successfully.")

@@ -1,18 +1,8 @@
-
-# feature_extraction.py
-
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 from data_loader import load_recording
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 DATASETS = [
     "1st_test",
@@ -30,35 +20,16 @@ BEARING_PARAMETERS = {
     "shaft_frequency_hz": 2000 / 60,
 }
 
-# Half-width around each theoretical frequency.
 FREQUENCY_BANDWIDTH_HZ = 2.0
-
-# Number of harmonics to measure.
 NUMBER_OF_HARMONICS = 3
-
-# Plot only the first recording of each experiment by default.
 PLOT_EVERY_RECORDING = False
 
-
-# ============================================================
-# PROJECT PATHS
-# ============================================================
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-
 DATA_DIR = PROJECT_DIR / "Data"
-
 PROCESSED_DIR = DATA_DIR / "processed"
 
 
-# ============================================================
-# CHARACTERISTIC BEARING FREQUENCIES
-# ============================================================
-
 def calculate_bearing_frequencies(parameters):
-
-    """Calculate theoretical FTF, BPFO, BPFI and BSF frequencies."""
-
     required = [
         "number_of_rolling_elements",
         "rolling_element_diameter_m",
@@ -98,19 +69,12 @@ def calculate_bearing_frequencies(parameters):
     }
 
 
-# ============================================================
-# FREQUENCY-BAND MEASUREMENTS
-# ============================================================
-
 def measure_frequency_band(
     frequencies,
     amplitude,
     center_hz,
     half_width_hz
 ):
-
-    """Measure peak amplitude, mean amplitude and relative band power."""
-
     mask = (
         (frequencies >= center_hz - half_width_hz)
         &
@@ -130,19 +94,10 @@ def measure_frequency_band(
 
     return {
         "peak_amplitude": float(np.max(band_amplitude)),
-
         "mean_amplitude": float(np.mean(band_amplitude)),
-
-        # Relative, unnormalised FFT-bin power.
         "band_power": float(np.sum(band_amplitude**2)),
-
         "bins_in_band": int(np.sum(mask)),
     }
-
-
-# ============================================================
-# FEATURE EXTRACTION
-# ============================================================
 
 def extract_features(
     dataset,
@@ -152,7 +107,6 @@ def extract_features(
     plot_path=None
 ):
 
-    """Extract time-domain, frequency-domain and bearing-frequency features."""
 
     features = {
 
@@ -175,98 +129,58 @@ def extract_features(
             dataset[column],
             errors="coerce"
         )
-
-        # Missing or infinite measurements must not be silently removed.
-        # Removing internal samples would change the effective sampling
-        # interval and distort the FFT.
         values = signal.to_numpy(dtype=float)
 
         if len(values) == 0:
             raise ValueError(
                 f"Empty signal: {dataset_name}, {column}"
             )
-
         if not np.all(np.isfinite(values)):
             raise ValueError(
                 f"Non-finite measurements detected in "
                 f"{dataset_name}, {recording_label}, {column}."
             )
 
-        # ====================================================
-        # TIME-DOMAIN FEATURES
-        # ====================================================
-
         mean_abs = np.mean(np.abs(values))
-
         rms = np.sqrt(np.mean(values**2))
-
         peak = np.max(np.abs(values))
-
         features[f"{column}_mean"] = np.mean(values)
-
         features[f"{column}_abs_mean"] = mean_abs
-
         features[f"{column}_rms"] = rms
-
         features[f"{column}_std"] = np.std(values)
-
         features[f"{column}_variance"] = np.var(values)
-
         features[f"{column}_skewness"] = signal.skew()
-
         features[f"{column}_kurtosis"] = signal.kurtosis()
-
         features[f"{column}_max"] = np.max(values)
-
         features[f"{column}_min"] = np.min(values)
-
         features[f"{column}_peak_to_peak"] = (
             np.max(values) - np.min(values)
         )
-
         features[f"{column}_crest_factor"] = (
             peak / rms if rms != 0 else np.nan
         )
-
         features[f"{column}_shape_factor"] = (
             rms / mean_abs if mean_abs != 0 else np.nan
         )
-
         features[f"{column}_impulse_factor"] = (
             peak / mean_abs if mean_abs != 0 else np.nan
         )
-
-        # ====================================================
-        # FFT SPECTRUM
-        # ====================================================
-
         centered_signal = values - np.mean(values)
-
         fft_values = np.fft.rfft(centered_signal)
-
         magnitude_all = np.abs(fft_values)
-
         frequencies_all = np.fft.rfftfreq(
             len(centered_signal),
             d=1.0 / SAMPLING_FREQUENCY
         )
-
-        # Exclude DC for general frequency-domain features.
         frequencies = frequencies_all[1:]
-
         magnitude = magnitude_all[1:]
-
         if len(magnitude) > 0 and np.sum(magnitude) > 0:
-
             dominant_index = np.argmax(magnitude)
-
             dominant_frequency = frequencies[dominant_index]
-
             spectral_centroid = (
                 np.sum(frequencies * magnitude)
                 / np.sum(magnitude)
             )
-
             spectral_bandwidth = np.sqrt(
                 np.sum(
                     ((frequencies - spectral_centroid) ** 2)
@@ -274,15 +188,11 @@ def extract_features(
                 )
                 / np.sum(magnitude)
             )
-
             power = magnitude**2
-
             probabilities = power / np.sum(power)
-
             entropy = -np.sum(
                 probabilities * np.log2(probabilities + 1e-12)
             )
-
             spectral_entropy = (
                 entropy / np.log2(len(probabilities))
                 if len(probabilities) > 1
@@ -292,11 +202,8 @@ def extract_features(
         else:
 
             dominant_frequency = 0.0
-
             spectral_centroid = 0.0
-
             spectral_bandwidth = 0.0
-
             spectral_entropy = 0.0
 
         features[
@@ -314,109 +221,74 @@ def extract_features(
         features[
             f"{column}_spectral_entropy"
         ] = spectral_entropy
-
-        # ====================================================
-        # BEARING CHARACTERISTIC FREQUENCIES
-        # ====================================================
-
         if fault_frequencies is None:
-
             for fault_name in ("FTF", "BPFO", "BPFI", "BSF"):
-
                 features[
                     f"{column}_{fault_name}_theoretical_hz"
                 ] = np.nan
-
                 for harmonic in range(
                     1,
                     NUMBER_OF_HARMONICS + 1
                 ):
-
                     prefix = (
                         f"{column}_{fault_name}_H{harmonic}"
                     )
-
                     features[
                         f"{prefix}_peak_amplitude"
                     ] = np.nan
-
                     features[
                         f"{prefix}_mean_amplitude"
                     ] = np.nan
-
                     features[
                         f"{prefix}_band_power"
                     ] = np.nan
-
                     features[
                         f"{prefix}_bins_in_band"
                     ] = 0
-
         else:
-
             for fault_name, fundamental_hz in fault_frequencies.items():
-
                 features[
                     f"{column}_{fault_name}_theoretical_hz"
                 ] = fundamental_hz
-
                 for harmonic in range(
                     1,
                     NUMBER_OF_HARMONICS + 1
                 ):
-
                     target_hz = fundamental_hz * harmonic
-
                     prefix = (
                         f"{column}_{fault_name}_H{harmonic}"
                     )
-
                     measured = measure_frequency_band(
                         frequencies_all,
                         magnitude_all,
                         target_hz,
                         FREQUENCY_BANDWIDTH_HZ,
                     )
-
                     features[
                         f"{prefix}_target_hz"
                     ] = target_hz
-
                     features[
                         f"{prefix}_peak_amplitude"
                     ] = measured["peak_amplitude"]
-
                     features[
                         f"{prefix}_mean_amplitude"
                     ] = measured["mean_amplitude"]
-
                     features[
                         f"{prefix}_band_power"
                     ] = measured["band_power"]
-
                     features[
                         f"{prefix}_bins_in_band"
                     ] = measured["bins_in_band"]
-
-        # Store spectrum for optional visualization.
         plot_signals.append(
             (column, frequencies_all, magnitude_all)
         )
-
     if plot_path is not None:
-
         plot_spectra(
             plot_signals,
             fault_frequencies,
             plot_path
         )
-
     return pd.DataFrame([features])
-
-
-# ============================================================
-# FFT VISUALIZATION
-# ============================================================
 
 def plot_spectra(
     plot_signals,
@@ -576,13 +448,7 @@ def process_dataset(dataset_name):
         print("\nTheoretical characteristic frequencies:")
 
         for name, value in fault_frequencies.items():
-
             print(f"  {name}: {value:.4f} Hz")
-
-    # ========================================================
-    # PROCESS EACH RECORDING
-    # ========================================================
-
     for index, file_path in enumerate(files):
 
         dataset = load_recording(
@@ -610,38 +476,25 @@ def process_dataset(dataset_name):
             recording_index=index,
             plot_path=plot_path
         )
-
         all_rows.append(row)
-
         if (
             (index + 1) % 100 == 0
             or index + 1 == len(files)
         ):
-
             print(
                 f"Processed {index + 1}/{len(files)} recordings"
             )
-
-    # ========================================================
-    # COMBINE AND SAVE FEATURES
-    # ========================================================
-
     results = pd.concat(
         all_rows,
         ignore_index=True
     )
 
     output_file = output_dir / "features_all.csv"
-
     results.to_csv(
         output_file,
         index=False,
         float_format="%.8g"
     )
-
-    # ========================================================
-    # SAVE CONFIGURATION
-    # ========================================================
 
     metadata = {
 
@@ -673,37 +526,18 @@ def process_dataset(dataset_name):
         output_dir / "feature_extraction_parameters.csv",
         index=False
     )
-
     print("\nFEATURE EXTRACTION COMPLETED")
-
     print("Dataset:", dataset_name)
-
     print("Feature table shape:", results.shape)
-
     print("Saved features:", output_file)
-
     print("Saved plots:", plot_dir)
-
     return results
 
-
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-
     for dataset_name in DATASETS:
-
         process_dataset(dataset_name)
-
     print("\n" + "=" * 70)
-
     print("ALL IMS DATASETS PROCESSED SUCCESSFULLY")
-
     print("=" * 70)
-
-
 if __name__ == "__main__":
-
     main()

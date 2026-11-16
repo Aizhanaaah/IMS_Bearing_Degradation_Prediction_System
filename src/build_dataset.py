@@ -191,7 +191,7 @@ def build():
             bearing_id = f"T{dataset[0]}_B{bearing}"
 
             rms = f[[f"{ch}_rms" for ch in channels]].mean(axis=1)
-            result = detect_fpt(rms.to_numpy(), **FPT_CONFIG)
+            result = detect_fpt(rms.to_numpy(), hours.to_numpy(), **FPT_CONFIG)
 
             if result["fpt_index"] is None:
                 print(f"  {bearing_id}: FPT not detected -> EXCLUDED.")

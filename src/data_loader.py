@@ -1,25 +1,10 @@
-
-# data_loader.py
-
 from pathlib import Path
 from datetime import datetime
-
 import pandas as pd
 import matplotlib.pyplot as plt
 
-
-# ============================================================
-# Paths
-# ============================================================
-
 DATA_DIR = Path(__file__).resolve().parent.parent / "Data"
-
 PROCESSED_DIR = DATA_DIR / "processed"
-
-
-# ============================================================
-# Dataset channel configuration
-# ============================================================
 
 CHANNEL_NAMES = {
 
@@ -39,10 +24,64 @@ CHANNEL_NAMES = {
     ]
 }
 
+# Number of VALID recordings per test (all downstream steps use only these).
+# 1st test: all 2156 files are real measurements.
+# 2nd test: 984 files, but the last two (2004.02.19.06.12.39 and .06.22.39)
+#   read ~0.002 g on every channel, i.e. the sensors were already switched
+#   off after the failure. They are not measurements -> 982 valid.
+# 3rd test: 6324 files (the readme says 4448, but bearing 3 only degrades in
+#   the last ~20 h, so the whole folder is used). The very last file reads
+#   ~0.002 g on every channel (sensors off) -> 6323 valid.
+VALID_RECORDINGS = {
+    "1st_test": 2156,
+    "2nd_test": 982,
+    "3rd_test": 6323,
+}
 
-# ============================================================
-# Recording discovery
-# ============================================================
+# A recording whose LOUDEST channel has an RMS below this value is treated as
+# "sensors off". Real recordings never go below ~0.07 g, dead ones are ~0.002 g.
+SENSOR_OFF_RMS = 0.02
+
+
+def load_features(dataset_name):
+    """
+    Load features_all.csv (written by feature_extraction.py), keep only the
+    valid recordings (VALID_RECORDINGS) and check that no sensor-off
+    recording is left in the table.
+    """
+
+    input_file = PROCESSED_DIR / dataset_name / "features_all.csv"
+
+    if not input_file.exists():
+        raise FileNotFoundError(
+            f"Feature table not found: {input_file}\n"
+            "Run feature_extraction.py first."
+        )
+
+    features = pd.read_csv(input_file)
+
+    n_valid = VALID_RECORDINGS[dataset_name]
+
+    if len(features) < n_valid:
+        raise ValueError(
+            f"{dataset_name}: {len(features)} feature rows, "
+            f"but {n_valid} valid recordings expected."
+        )
+
+    features = features.iloc[:n_valid].reset_index(drop=True)
+
+    rms_columns = [c for c in features.columns if c.endswith("_rms")]
+    loudest = features[rms_columns].max(axis=1)
+    dead = features.loc[loudest < SENSOR_OFF_RMS, "recording"].tolist()
+
+    if dead:
+        raise ValueError(
+            f"{dataset_name}: sensor-off recordings inside the valid range: "
+            f"{dead}. Check VALID_RECORDINGS."
+        )
+
+    return features
+
 
 def get_recording_files(dataset_name):
 
@@ -58,18 +97,18 @@ def get_recording_files(dataset_name):
             f"Dataset folder not found: {folder}"
         )
 
-    # Preserve the existing directory order.
-    files = [
-        f for f in folder.iterdir()
-        if f.is_file()
-    ]
+    # Fixed-width timestamp names: sorting by name = chronological order.
+    # (iterdir() itself does not guarantee any order.)
+    files = sorted(
+        (f for f in folder.iterdir() if f.is_file()),
+        key=lambda f: f.name
+    )
 
     if not files:
         raise FileNotFoundError(
             f"No recordings found in: {folder}"
         )
 
-    # Check that filenames represent chronological recordings.
     timestamps = []
 
     for file in files:
@@ -99,10 +138,6 @@ def get_recording_files(dataset_name):
     return files
 
 
-# ============================================================
-# Load one recording
-# ============================================================
-
 def load_recording(dataset_name, filename):
 
     if dataset_name not in CHANNEL_NAMES:
@@ -117,7 +152,6 @@ def load_recording(dataset_name, filename):
             f"Recording not found: {file_path}"
         )
 
-    # IMS files are tab-separated and have no header.
     dataset = pd.read_csv(
         file_path,
         sep="\t",
@@ -134,7 +168,6 @@ def load_recording(dataset_name, filename):
 
     dataset.columns = expected_channels
 
-    # Ensure all measurements are numeric.
     dataset = dataset.apply(
         pd.to_numeric,
         errors="raise"
@@ -142,10 +175,6 @@ def load_recording(dataset_name, filename):
 
     return dataset
 
-
-# ============================================================
-# Inspect and visualize each dataset
-# ============================================================
 
 def inspect_dataset(dataset_name):
 
@@ -169,7 +198,6 @@ def inspect_dataset(dataset_name):
         exist_ok=True
     )
 
-    # Save first recording as a CSV table.
     csv_path = output_dir / "first_recording.csv"
 
     dataset.to_csv(
@@ -177,7 +205,6 @@ def inspect_dataset(dataset_name):
         index=False
     )
 
-    # Plot the vibration signals.
     ax = dataset.plot(
         figsize=(14, 5),
         title=f"Bearing Vibration - {dataset_name}"
@@ -199,7 +226,6 @@ def inspect_dataset(dataset_name):
 
     plt.close()
 
-    # Dataset information.
     print("\n" + "=" * 60)
     print(f"DATASET: {dataset_name}")
     print("=" * 60)
@@ -217,10 +243,6 @@ def inspect_dataset(dataset_name):
     print("Vibration plot saved:", plot_path)
 
 
-# ============================================================
-# Main
-# ============================================================
-
 if __name__ == "__main__":
 
     for dataset_name in [
@@ -230,5 +252,3 @@ if __name__ == "__main__":
     ]:
 
         inspect_dataset(dataset_name)
-
-    print("\nAll datasets inspected successfully.")

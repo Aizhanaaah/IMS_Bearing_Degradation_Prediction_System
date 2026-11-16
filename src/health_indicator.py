@@ -1,39 +1,25 @@
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 from statsmodels.nonparametric.smoothers_lowess import lowess
-
-
-# --------------------------------------------------
-# 1. Paths and configuration
-# --------------------------------------------------
+from data_loader import load_features
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "Data"
 PROCESSED_DIR = DATA_DIR / "processed"
-
 DATASETS = ["1st_test", "2nd_test", "3rd_test"]
-
 LOESS_SPAN = 0.1
 TOP_N_PER_CHANNEL = 5
-
 SCORE_COLUMNS = [
     "monotonicity",
     "trendability",
     "robustness",
 ]
-
-# Columns that are NOT measured from the signal. They are fixed
-# parameters (target frequencies, bin counts) and never change over
-# time, so they must never be used as health-indicator candidates.
 EXCLUDE_SUFFIXES = (
     "_target_hz",
     "_theoretical_hz",
     "_bins_in_band",
 )
-
 CHANNELS = {
     "1st_test": [
         "Bx_1", "By_1",
@@ -44,12 +30,6 @@ CHANNELS = {
     "2nd_test": ["B1", "B2", "B3", "B4"],
     "3rd_test": ["B1", "B2", "B3", "B4"],
 }
-
-
-# --------------------------------------------------
-# 2. Group channels by physical bearing
-# --------------------------------------------------
-
 def get_bearing_channels(dataset_name):
 
     if dataset_name == "1st_test":
@@ -66,33 +46,13 @@ def get_bearing_channels(dataset_name):
         3: ["B3"],
         4: ["B4"],
     }
-
-
-# --------------------------------------------------
-# 3. Feature selection
-# --------------------------------------------------
-
 def compare_and_select_features(
     quality,
     channels,
     features,
     top_n=TOP_N_PER_CHANNEL
 ):
-    """
-    Rank features separately within each channel.
-
-    Before ranking, features that are not real signal measurements
-    are removed:
-      - fixed parameters (names ending in EXCLUDE_SUFFIXES)
-      - features missing from the feature table
-      - constant features (only one unique value)
-
-    The composite score is the mean of available quality
-    metrics. At least two metrics must be available.
-    """
-
     results = quality.copy()
-
     required_columns = [
         "feature",
         "monotonicity",
@@ -111,12 +71,10 @@ def compare_and_select_features(
             f"Missing columns in feature-quality file: {missing}"
         )
 
-    # Retain only valid channel-feature combinations.
     results = results[
         results["channel"].isin(channels)
     ].copy()
 
-    # Remove fixed parameters and constant features.
     def is_real_signal_feature(name):
 
         if str(name).endswith(EXCLUDE_SUFFIXES):
@@ -143,17 +101,14 @@ def compare_and_select_features(
         f"constant features, {len(results)} remain."
     )
 
-    # Count the available quality metrics for each feature.
     results["available_metrics"] = (
         results[SCORE_COLUMNS].notna().sum(axis=1)
     )
 
-    # Require at least two available metrics.
     results["eligible"] = (
         results["available_metrics"] >= 2
     )
 
-    # Equal-weight average of available metrics.
     results["composite_score"] = (
         results[SCORE_COLUMNS].mean(axis=1, skipna=True)
     )
@@ -208,27 +163,11 @@ def compare_and_select_features(
 
     return results.reset_index(drop=True), selected.reset_index(drop=True)
 
-
-# --------------------------------------------------
-# 4. Construct one Health Indicator
-# --------------------------------------------------
-
 def construct_health_indicator(
     features,
     selected_feature_names,
     loess_span=LOESS_SPAN
 ):
-    """
-    Construct an exploratory HI from selected features.
-
-    Steps:
-    1. Min-max normalize each selected feature.
-    2. Align feature direction with recording time.
-    3. Calculate the equal-weight average.
-    4. Smooth the combined HI using LOWESS.
-
-    Every skipped feature prints the reason.
-    """
 
     selected_feature_names = [
         name
@@ -311,13 +250,11 @@ def construct_health_indicator(
             "No usable selected features remained after preprocessing."
         )
 
-    # Equal-weight fusion of normalized features.
     raw_hi = aligned_features.mean(
         axis=1,
         skipna=True
     )
 
-    # Interpolate missing values before smoothing.
     raw_hi = raw_hi.interpolate(
         method="linear",
         limit_direction="both"
@@ -328,7 +265,6 @@ def construct_health_indicator(
             "The combined HI contains missing values."
         )
 
-    # LOWESS smoothing.
     smoothed_hi = lowess(
         endog=raw_hi.to_numpy(),
         exog=time_index,
@@ -342,11 +278,6 @@ def construct_health_indicator(
     })
 
     return result, used_features
-
-
-# --------------------------------------------------
-# 5. Plot Health Indicator
-# --------------------------------------------------
 
 def plot_health_indicator(
     hi,
@@ -398,11 +329,6 @@ def plot_health_indicator(
 
     print(f"Plot saved: {plot_file}")
 
-
-# --------------------------------------------------
-# 6. Process one experiment
-# --------------------------------------------------
-
 def process_dataset(dataset_name):
 
     print("\n====================================")
@@ -445,7 +371,7 @@ def process_dataset(dataset_name):
 
     # Load feature-quality results and extracted features.
     quality = pd.read_csv(quality_file)
-    features = pd.read_csv(features_file)
+    features = load_features(dataset_name)
 
     channels = CHANNELS[dataset_name]
 
@@ -453,10 +379,6 @@ def process_dataset(dataset_name):
         raise ValueError(
             f"Empty input table found in {dataset_name}."
         )
-
-    # --------------------------------------------------
-    # Feature selection
-    # --------------------------------------------------
 
     comparison, selected = compare_and_select_features(
         quality,
@@ -484,10 +406,6 @@ def process_dataset(dataset_name):
             f"No features were selected for {dataset_name}."
         )
 
-    # --------------------------------------------------
-    # Recording metadata
-    # --------------------------------------------------
-
     if "recording" in features.columns:
 
         recording_column = features["recording"]
@@ -510,10 +428,6 @@ def process_dataset(dataset_name):
     output = pd.DataFrame({
         "recording": recording_column
     })
-
-    # --------------------------------------------------
-    # Construct HI for each physical bearing
-    # --------------------------------------------------
 
     bearing_channels = get_bearing_channels(
         dataset_name
@@ -574,10 +488,6 @@ def process_dataset(dataset_name):
         for feature in used_features:
             print(f"  - {feature}")
 
-    # --------------------------------------------------
-    # Save all Health Indicators
-    # --------------------------------------------------
-
     output.to_csv(
         hi_file,
         index=False,
@@ -586,18 +496,12 @@ def process_dataset(dataset_name):
 
     print(f"\nHealth indicators saved: {hi_file}")
 
-
-# --------------------------------------------------
-# 7. Main
-# --------------------------------------------------
-
 def main():
 
     for dataset_name in DATASETS:
         process_dataset(dataset_name)
 
     print("\nAll health indicators constructed successfully.")
-
 
 if __name__ == "__main__":
     main()

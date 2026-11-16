@@ -1,8 +1,12 @@
+import itertools
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from data_loader import load_features
 
 
 # --------------------------------------------------
@@ -11,12 +15,9 @@ import matplotlib.pyplot as plt
 
 PROCESSED = Path(__file__).resolve().parent.parent / "Data" / "processed"
 
-# Number of recordings documented in the IMS readme.
-EXPECTED_N = {
-    "1st_test": 2156,
-    "2nd_test": 984,
-    "3rd_test": 4448,
-}
+# The number of recordings used per test (and why the last sensor-off
+# recordings of tests 2 and 3 are dropped) is defined once in
+# data_loader.VALID_RECORDINGS, so that every pipeline step uses the same data.
 
 # Bearings with documented failure -> channels used for the RMS signal.
 TARGETS = {
@@ -25,22 +26,39 @@ TARGETS = {
     "3rd_test": {3: ["B3"]},
 }
 
-# 3-sigma FPT detector settings (all are design choices, not "truth").
-#   skip_initial_frac : share of the run skipped at the start (run-in transient)
-#   baseline_frac     : share of the run used as the healthy reference,
-#                       taken right after the skipped part
-#   smooth_window     : causal (trailing) moving-average window, in recordings
-#   k                 : threshold = mean +/- k * std of the smoothed baseline
-#   consecutive       : number of consecutive points beyond the threshold to trigger
-#   one_sided         : True = only upward excursions count (RMS grows with damage)
+# --------------------------------------------------------------------------
+# FPT detector: 3-sigma rule with an expanding window and a consecutive
+# trigger, following the description in the literature, e.g. the FPT section
+# of arXiv 2501.07191 (which builds on the consecutive-trigger idea of
+# Lei et al.):
+#
+#     cv_t = mu_{t-1} + 3 * sigma_{t-1}
+#
+# where mu and sigma come from ALL previous RMS values. If `consecutive`
+# RMS values in a row exceed cv_t, time t is the FPT.
+#
+# Which parameter comes from where:
+#   k = 3              literature (3-sigma rule)
+#   consecutive = 3    literature (three consecutive values in 2501.07191;
+#                      the Robust-MBDL paper, arXiv 2309.06157, uses two)
+#   two_sided = False  AUTHOR'S CHOICE. The papers write mu +/- 3*sigma, but
+#                      RMS grows with damage, so only the upper bound is used.
+#   min_history = 50   AUTHOR'S CHOICE. The expanding statistics need some
+#                      history before they mean anything (50 recordings
+#                      ~ 8 hours at 10-minute sampling).
+#   reset_gap_hours=24 AUTHOR'S CHOICE (data handling, not from a paper).
+#                      Test 1 has a ~148-hour recording gap after which the
+#                      RMS level is different. The statistics are restarted
+#                      after any gap of at least this length, so that two
+#                      monitoring sessions are not mixed. Set to None to
+#                      switch it off.
+# --------------------------------------------------------------------------
 FPT_CONFIG = {
-    "skip_initial_frac": 0.05,
-    "baseline_frac": 0.10,
-    "smooth_window": 25,
     "k": 3.0,
-    "consecutive": 5,
-    "min_baseline": 30,
-    "one_sided": True,
+    "consecutive": 3,
+    "min_history": 50,
+    "reset_gap_hours": 24.0,
+    "two_sided": False,
 }
 
 TIME_FORMAT = "%Y.%m.%d.%H.%M.%S"
@@ -51,9 +69,9 @@ TIME_FORMAT = "%Y.%m.%d.%H.%M.%S"
 # --------------------------------------------------
 
 def load_dataset(dataset):
-    """Load features, truncate to the documented length, build time axis."""
+    """Load the valid recordings' features and build the time axis."""
 
-    f = pd.read_csv(PROCESSED / dataset / "features_all.csv")
+    f = load_features(dataset)
 
     t = pd.to_datetime(
         f["recording"].astype(str),
@@ -62,10 +80,6 @@ def load_dataset(dataset):
 
     if not t.is_monotonic_increasing:
         raise ValueError(f"{dataset}: recordings are not time-ordered.")
-
-    n = EXPECTED_N[dataset]
-    f = f.iloc[:n].copy().reset_index(drop=True)
-    t = t.iloc[:n].reset_index(drop=True)
 
     hours = (t - t.iloc[0]).dt.total_seconds() / 3600.0
 
@@ -99,79 +113,112 @@ def make_base_labels(f, t, hours, dataset):
 
 
 # --------------------------------------------------
-# 3. FPT detection (causal 3-sigma, Robust-MBDL style)
+# 3. FPT detection (expanding-window 3-sigma, consecutive trigger)
 # --------------------------------------------------
 
 def detect_fpt(
     signal,
-    baseline_frac=0.10,
-    skip_initial_frac=0.05,
-    smooth_window=25,
+    hours=None,
     k=3.0,
-    consecutive=5,
-    min_baseline=30,
-    one_sided=True
+    consecutive=3,
+    min_history=50,
+    reset_gap_hours=24.0,
+    two_sided=False
 ):
     """
-    Learning phase : mean and std from a healthy window near the start of the
-                     run (after skipping the run-in transient).
-    Detecting phase: scan forward; when `consecutive` smoothed points in a row
-                     are beyond mean +/- k*std, the detector fires.
+    For every time t the threshold is built from all PREVIOUS values
+    (inside the current monitoring session):
 
-    Everything is causal: the smoothing is a trailing moving average and the
-    baseline comes from the early part of the run only. The FPT is the index
-    at which the trigger completes; the first point of that run is stored as
-    `onset_index` for reference.
+        cv_t = mu_{t-1} + k * sigma_{t-1}
+
+    The first t for which `consecutive` values in a row (t, t+1, ...) all
+    exceed cv_t is the FPT. The detector therefore knows about it
+    `consecutive - 1` recordings later (20 minutes for consecutive = 3).
+
+    A new monitoring session (fresh statistics) starts after every recording
+    gap of at least `reset_gap_hours`.
     """
 
-    x = pd.Series(np.asarray(signal, dtype=float))
+    x = np.asarray(signal, dtype=float)
+    n = len(x)
 
-    smoothed = (
-        x.rolling(smooth_window, min_periods=1)
-        .mean()
-        .to_numpy()
-    )
+    # Start index of the monitoring session each recording belongs to.
+    seg_start = np.zeros(n, dtype=int)
 
-    start = int(len(smoothed) * skip_initial_frac)
-    n_base = max(int(len(smoothed) * baseline_frac), min_baseline)
-    end = start + n_base
+    if hours is not None and reset_gap_hours is not None:
 
-    if end >= len(smoothed):
-        raise ValueError("Baseline window is longer than the signal.")
+        h = np.asarray(hours, dtype=float)
+        start = 0
 
-    mu = float(np.mean(smoothed[start:end]))
-    sigma = float(np.std(smoothed[start:end]))
+        for i in range(1, n):
 
-    lower = mu - k * sigma
-    upper = mu + k * sigma
+            if h[i] - h[i - 1] >= reset_gap_hours:
+                start = i
 
-    if one_sided:
-        outside = smoothed > upper
-    else:
-        outside = (smoothed > upper) | (smoothed < lower)
+            seg_start[i] = start
+
+    # Cumulative sums give expanding mean/std in O(n).
+    c1 = np.concatenate([[0.0], np.cumsum(x)])
+    c2 = np.concatenate([[0.0], np.cumsum(x * x)])
+
+    mu_t = np.full(n, np.nan)
+    sd_t = np.full(n, np.nan)
+
+    for i in range(n):
+
+        s = seg_start[i]
+        m = i - s
+
+        if m < min_history:
+            continue
+
+        mean = (c1[i] - c1[s]) / m
+        var = max((c2[i] - c2[s]) / m - mean ** 2, 0.0)
+
+        mu_t[i] = mean
+        sd_t[i] = np.sqrt(var)
+
+    upper_t = mu_t + k * sd_t
+    lower_t = mu_t - k * sd_t
+
+    fpt = None
+
+    for t in range(n - consecutive + 1):
+
+        if np.isnan(upper_t[t]):
+            continue
+
+        # All points of the trigger window must belong to the same monitoring
+        # session as t. Without this, a window at the very end of a session
+        # can reach across a recording gap into the next session (which may
+        # run at a different level) and fire a false FPT.
+        if seg_start[t + consecutive - 1] != seg_start[t]:
+            continue
+
+        window = x[t:t + consecutive]
+
+        beyond = window > upper_t[t]
+
+        if two_sided:
+            beyond = beyond | (window < lower_t[t])
+
+        if beyond.all():
+            fpt = t
+            break
 
     result = {
-        "fpt_index": None,
-        "onset_index": None,
-        "baseline_start": start,
-        "baseline_end": end,
-        "mu": mu,
-        "sigma": sigma,
-        "lower": lower,
-        "upper": upper,
-        "smoothed": smoothed,
+        "fpt_index": fpt,
+        "onset_index": fpt,
+        "detection_index": None if fpt is None else fpt + consecutive - 1,
+        "mu_t": mu_t,
+        "upper_t": upper_t,
+        "lower_t": lower_t,
+        "seg_start": seg_start,
+        # The healthy part before the FPT (inside its session) is the
+        # baseline for the per-bearing feature normalization.
+        "baseline_start": None if fpt is None else int(seg_start[fpt]),
+        "baseline_end": fpt,
     }
-
-    run = 0
-
-    for i in range(end, len(smoothed)):
-
-        run = run + 1 if outside[i] else 0
-
-        if run >= consecutive:
-            result["fpt_index"] = i
-            result["onset_index"] = i - consecutive + 1
-            break
 
     return result
 
@@ -187,7 +234,7 @@ def add_fpt_labels(labels, fpt_index):
     idx = np.arange(len(out))
     rul_at_fpt = out["rul_hours"].iloc[fpt_index]
 
-    # 0 = healthy stage, 1 = degradation stage (after FPT)
+    # 0 = healthy stage, 1 = degradation stage (from the FPT on)
     out["stage"] = (idx >= fpt_index).astype(int)
 
     # Piecewise: flat cap before FPT, linear decrease after.
@@ -211,21 +258,25 @@ def plot_fpt(hours, rms, result, dataset, bearing, plot_dir):
 
     plt.figure(figsize=(12, 5))
 
-    plt.plot(hours, rms, linewidth=0.6, alpha=0.4, label="RMS raw (mean of channels)")
-    plt.plot(hours, result["smoothed"], linewidth=1.5, label="RMS smoothed (causal)")
+    # Break the line across recording gaps (> 30 min) so that matplotlib
+    # does not draw fake straight lines through missing data.
+    gap = (hours.diff() * 60.0) > 30.0
 
-    plt.axvspan(
-        hours.iloc[result["baseline_start"]],
-        hours.iloc[result["baseline_end"] - 1],
-        alpha=0.15,
-        label="baseline window"
-    )
+    def broken(values):
+        return pd.Series(np.asarray(values, dtype=float)).where(~gap)
 
-    plt.axhline(result["mu"], linestyle="--", linewidth=1, label="baseline mean")
-    plt.axhline(result["upper"], linestyle=":", linewidth=1, label="upper threshold")
+    plt.plot(hours, broken(rms), linewidth=0.7, label="RMS (mean of channels)")
+    plt.plot(hours, broken(result["mu_t"]), linestyle="--", linewidth=1,
+             label="expanding mean")
+    plt.plot(hours, broken(result["upper_t"]), linestyle=":", linewidth=1.2,
+             label="mean + k*std (expanding)")
 
-    if not FPT_CONFIG["one_sided"]:
-        plt.axhline(result["lower"], linestyle=":", linewidth=1, label="lower threshold")
+    # Mark the starts of new monitoring sessions (statistics restarts).
+    session_starts = np.unique(result["seg_start"])
+
+    for s in session_starts[session_starts > 0]:
+        plt.axvline(hours.iloc[s], color="gray", linestyle="-.", linewidth=1,
+                    label="session restart (gap)")
 
     if result["fpt_index"] is not None:
         plt.axvline(
@@ -235,10 +286,14 @@ def plot_fpt(hours, rms, result, dataset, bearing, plot_dir):
             label=f"FPT (index {result['fpt_index']})"
         )
 
+    # Remove duplicate legend entries.
+    handles, labels_ = plt.gca().get_legend_handles_labels()
+    unique = dict(zip(labels_, handles))
+    plt.legend(unique.values(), unique.keys())
+
     plt.xlabel("Hours from start")
     plt.ylabel("RMS")
     plt.title(f"{dataset} - Bearing {bearing}: FPT detection")
-    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
@@ -286,7 +341,7 @@ def process_dataset(dataset):
 
         rms = f[rms_columns].mean(axis=1)
 
-        result = detect_fpt(rms.to_numpy(), **FPT_CONFIG)
+        result = detect_fpt(rms.to_numpy(), hours.to_numpy(), **FPT_CONFIG)
 
         print(f"\nBearing {bearing} (channels: {', '.join(channels)})")
 
@@ -324,8 +379,9 @@ def process_dataset(dataset):
         life_fraction = fpt_hours / hours.iloc[-1]
 
         print(
-            f"  FPT index = {fpt_index} (onset {result['onset_index']}), "
-            f"{fpt_hours:.1f} h = {life_fraction * 100:.1f}% of the run"
+            f"  FPT index = {fpt_index}, {fpt_hours:.1f} h = "
+            f"{life_fraction * 100:.1f}% of the run, "
+            f"{len(labels) - fpt_index} post-FPT rows"
         )
 
         summary_rows.append({
@@ -334,16 +390,97 @@ def process_dataset(dataset):
             "n": len(labels),
             "T_end_h": hours.iloc[-1],
             "fpt_index": fpt_index,
-            "onset_index": result["onset_index"],
             "fpt_hours": fpt_hours,
             "fpt_life_fraction": life_fraction,
+            "post_fpt_rows": len(labels) - fpt_index,
             "rul_at_fpt_h": hours.iloc[-1] - fpt_hours,
-            "baseline_mean": result["mu"],
-            "baseline_std": result["sigma"],
-            "upper_threshold": result["upper"],
+            "mean_at_fpt": result["mu_t"][fpt_index],
+            "upper_at_fpt": result["upper_t"][fpt_index],
         })
 
     return summary_rows
+
+
+# --------------------------------------------------
+# 7. Optional: FPT sensitivity table
+#    python rul_labels.py --sensitivity
+# --------------------------------------------------
+
+SENSITIVITY_GRID = {
+    "k": [3.0, 4.0],
+    "consecutive": [2, 3, 5],
+    "reset_gap_hours": [24.0, None],
+    "two_sided": [False, True],
+}
+
+
+def run_sensitivity():
+    """
+    Shows how the detected FPT moves when the detector settings change.
+    Cell = <FPT as share of the run's time> | <number of post-FPT rows>.
+    "--" means no FPT was detected. Same settings for all bearings.
+    """
+
+    rows = []
+
+    for dataset, bearing_map in TARGETS.items():
+
+        f, t, hours = load_dataset(dataset)
+        t_end = hours.iloc[-1]
+        n = len(hours)
+
+        for bearing, channels in bearing_map.items():
+
+            bearing_id = f"T{dataset[0]}_B{bearing}"
+            rms = f[[f"{ch}_rms" for ch in channels]].mean(axis=1).to_numpy()
+
+            for k, consecutive, reset, two_sided in itertools.product(
+                SENSITIVITY_GRID["k"],
+                SENSITIVITY_GRID["consecutive"],
+                SENSITIVITY_GRID["reset_gap_hours"],
+                SENSITIVITY_GRID["two_sided"],
+            ):
+
+                config = dict(FPT_CONFIG)
+                config.update(
+                    k=k,
+                    consecutive=consecutive,
+                    reset_gap_hours=reset,
+                    two_sided=two_sided,
+                )
+
+                result = detect_fpt(rms, hours.to_numpy(), **config)
+                index = result["fpt_index"]
+
+                cell = (
+                    "--"
+                    if index is None
+                    else f"{hours.iloc[index] / t_end:.2f} | {n - index}"
+                )
+
+                reset_text = "off" if reset is None else f"{reset:g}h"
+
+                rows.append({
+                    "setting": (
+                        f"k={k:g}, consec={consecutive}, "
+                        f"reset={reset_text}, two_sided={two_sided}"
+                    ),
+                    "bearing": bearing_id,
+                    "cell": cell,
+                })
+
+    table = (
+        pd.DataFrame(rows)
+        .pivot(index="setting", columns="bearing", values="cell")
+    )
+
+    print("\nFPT sensitivity (time share | post-FPT rows)")
+    print("=" * 70)
+    print(table.to_string())
+
+    out = PROCESSED / "fpt_sensitivity.csv"
+    table.to_csv(out)
+    print(f"\nSaved: {out}")
 
 
 # --------------------------------------------------
@@ -370,4 +507,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+
+    if "--sensitivity" in sys.argv:
+        run_sensitivity()
+    else:
+        main()

@@ -5,17 +5,10 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-# --------------------------------------------------
-# Paths and configuration
-# --------------------------------------------------
-
 DATA_DIR = Path(__file__).resolve().parent.parent / "Data"
 PROCESSED_DIR = DATA_DIR / "processed"
 
 DATASETS = ["1st_test", "2nd_test", "3rd_test"]
-
-# health_indicator.py saves to:
-#   Data/processed/<dataset>/health_indicators.csv
 HI_FILENAME = "health_indicators.csv"
 RESULTS_FILENAME = "health_indicator_validation.csv"
 
@@ -37,22 +30,10 @@ COLUMN_ORDER = [
     "normalized_roughness",
 ]
 
-
-# --------------------------------------------------
-# Evaluation metrics
-# --------------------------------------------------
-
 def evaluate_indicator(values):
-    """
-    Evaluate the trend and variability of one HI sequence.
-
-    Returns None if fewer than three valid observations exist
-    (for example, a bearing without any usable features).
-    """
 
     values = np.asarray(values, dtype=float)
 
-    # Retain finite values while preserving their original time positions.
     valid = np.isfinite(values)
     time = np.arange(len(values), dtype=float)[valid]
     hi = values[valid]
@@ -66,32 +47,24 @@ def evaluate_indicator(values):
     negative = int(np.sum(differences < 0))
     nonzero = positive + negative
 
-    # Signed monotonicity:
-    # +1 = consistently increasing
-    # -1 = consistently decreasing
-    #  0 = balanced increases and decreases
     monotonicity = (
         (positive - negative) / nonzero
         if nonzero > 0
         else 0.0
     )
 
-    # Spearman correlation between recording order and HI.
     spearman_rho = spearmanr(time, hi).statistic
 
     hi_min = float(np.min(hi))
     hi_max = float(np.max(hi))
     hi_range = hi_max - hi_min
 
-    # Average absolute change relative to the total HI range.
-    # Lower values generally indicate a smoother trajectory.
     normalized_roughness = (
         float(np.mean(np.abs(differences)) / hi_range)
         if hi_range > 0
         else np.nan
     )
 
-    # Direction of the overall change.
     endpoint_change = float(hi[-1] - hi[0])
 
     return {
@@ -106,11 +79,6 @@ def evaluate_indicator(values):
         "negative_steps": negative,
         "normalized_roughness": normalized_roughness,
     }
-
-
-# --------------------------------------------------
-# Evaluate one dataset
-# --------------------------------------------------
 
 def evaluate_dataset(dataset_name):
 
@@ -183,10 +151,6 @@ def evaluate_dataset(dataset_name):
     return results
 
 
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
-
 def main():
 
     frames = []
@@ -210,9 +174,7 @@ def main():
         index=False,
         float_format="%.6f",
     )
-
     print(f"\nCombined results saved to: {ALL_RESULTS_FILE}")
-
 
 if __name__ == "__main__":
     main()

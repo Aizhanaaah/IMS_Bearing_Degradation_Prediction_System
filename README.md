@@ -45,7 +45,7 @@ ThesisWork/
 │   ├── rul_labels.py          # RUL labels + FPT detection (3-sigma rule, consecutive trigger)
 │   ├── build_dataset.py       # One unified ML table for the 4 failed bearings + fold definitions
 │   ├── models.py              # Linear, Random Forest and SVR RUL models with experiment switches
-│   └── run_experiment.py      # (placeholder)
+│   └── run_experiment.py      # Run several model experiments and compare them
 ├── notebooks/
 │   └── exploratory_analysis.ipynb
 ├── literature/
@@ -72,7 +72,8 @@ python validation.py
 python rul_labels.py
 python rul_labels.py --sensitivity   # optional: FPT parameter sensitivity study
 python build_dataset.py
-python models.py
+python models.py                     # one run with the default settings
+python run_experiment.py             # or: several experiments + comparison table
 ```
 
 ### 1. Feature extraction
@@ -109,28 +110,51 @@ Evaluation protocol (leave-one-test-out, so bearings from the same test never ap
 
 | Round | Train | Test |
 |-------|-------|------|
-| 1 | T2_B1, T3_B3 | T1_B4 |
+| 1 | T2_B1, T3_B3 | T1_B3, T1_B4 |
 | 2 | T1_B3, T1_B4, T3_B3 | T2_B1 |
 | 3 | T1_B3, T1_B4, T2_B1 | T3_B3 |
 
+The folds come from `make_folds()` in `build_dataset.py`. Metrics are computed per test bearing and averaged over all four.
+
 Everything that learns from data (feature selection, duplicate removal, scaling, hyperparameters) is fitted on the training bearings of the round only.
 
-The **EXPERIMENT SETTINGS** block at the top of `models.py` holds the switches for each idea (dataset type, feature set, duplicate removal, smoothing, running-max features, log transform, model hyperparameters, ...). Change one setting at a time, give the run a new `EXPERIMENT_NAME`, and compare runs in `Data/processed/experiment_log_v2.csv`. Plots go to `Data/processed/plots/experiments/<EXPERIMENT_NAME>/`.
+`DEFAULT_SETTINGS` at the top of `models.py` holds the switches for each idea: dataset type, feature set, target (`rul_piecewise_hours` or the normalized `rul_norm_fpt`), equal per-bearing weights, duplicate removal, smoothing, running-max features, log transform and model hyperparameters.
+
+### 6. Experiments
+`run_experiment.py` runs a list of experiments. Each one starts from the defaults and changes only a few settings:
+
+```python
+EXPERIMENTS = [
+    {"EXPERIMENT_NAME": "baseline"},
+    {"EXPERIMENT_NAME": "norm_target", "TARGET": "rul_norm_fpt"},
+    {"EXPERIMENT_NAME": "bearing_weights", "BEARING_WEIGHTS": True},
+    ...
+]
+```
+
+```bash
+python run_experiment.py                       # all experiments
+python run_experiment.py baseline norm_target  # only these
+python run_experiment.py --quick               # skip the SVR grid search (much faster)
+python run_experiment.py --list                # show experiment names
+```
+
+It prints a table of test MAE in hours per bearing and experiment. Every run is also added to `Data/processed/experiment_log_v2.csv`, and its plots go to `Data/processed/plots/experiments/<EXPERIMENT_NAME>/`. With the SVR grid search on, one experiment takes several minutes.
 
 ---
 
 ## Current results
 
-Latest run (`rerun_after_fixes`: z-score dataset, 9 physics-based features), averaged over the 3 test bearings:
+Default settings (z-score dataset, 9 physics-based features, hours target, tuned SVR), averaged over the 4 test bearings:
 
 | Model | MAE (h) | RMSE (h) | R² |
 |-------|---------|----------|-----|
-| Mean baseline | 188.3 | 203.6 | −35.8 |
-| Linear | 183.4 | 202.4 | −33.8 |
-| **Random Forest** | **102.8** | **124.8** | **−4.4** |
-| SVR | 138.8 | 159.3 | −15.2 |
+| Mean baseline | 187.8 | 199.5 | −49.3 |
+| Linear | 188.7 | 205.1 | −54.6 |
+| **Random Forest** | **92.6** | **116.6** | **−8.6** |
+| SVR | 141.7 | 162.7 | −30.5 |
 
-Random Forest is the best model so far, with good results on `T2_B1` (MAE ≈ 14.7 h). Generalising to `T3_B3`, whose post-FPT phase is much longer than any training bearing, is still the main open problem. The negative R² values show how hard cross-test generalisation is with only four run-to-failure bearings.
+Random Forest is the best model so far, with good results on `T2_B1` (MAE ≈ 14.7 h). Generalising to `T3_B3`, whose post-FPT phase is much longer than any training bearing, is still the main open problem: no training bearing has a RUL above 109 h, so no model can predict its 515 h RUL at FPT (the best possible MAE with that cap is about 162 h). The negative R² values show how hard cross-test generalisation is with only four run-to-failure bearings.
 
 ---
 

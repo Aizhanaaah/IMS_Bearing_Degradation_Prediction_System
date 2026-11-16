@@ -29,6 +29,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from scipy.stats import spearmanr
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
@@ -173,20 +174,23 @@ def prepare_features(df, cfg):
 # 2. Feature selection helpers (TRAINING bearings only)
 # ==================================================================
 
-def spearman_per_bearing(train, features, target):
+def spearman_per_bearing(X, y, groups, features):
     """Rows = features, columns = training bearings, values = Spearman rho with RUL."""
+    y = np.asarray(y, dtype=float)
+    groups = np.asarray(groups)
     table = {}
-    for bearing, group in train.groupby("bearing_id"):
+    for bearing in np.unique(groups):
+        mask = groups == bearing
         table[bearing] = {
-            f: spearmanr(group[f], group[target]).statistic for f in features
+            f: spearmanr(X[f].to_numpy()[mask], y[mask]).statistic for f in features
         }
     return pd.DataFrame(table).fillna(0.0)
 
 
-def select_by_rule(train, features, cfg):
+def select_by_rule(X, y, groups, features, cfg, verbose=True):
     """Keep a feature only if it has the same sign and |rho| >= MIN_ABS_SPEARMAN
     in every training bearing. If nothing passes, keep the top 3 by mean |rho|."""
-    rho = spearman_per_bearing(train, features, cfg["TARGET"])
+    rho = spearman_per_bearing(X, y, groups, features)
 
     same_sign = (np.sign(rho).nunique(axis=1) == 1)
     strong = (rho.abs().min(axis=1) >= cfg["MIN_ABS_SPEARMAN"])
@@ -195,18 +199,19 @@ def select_by_rule(train, features, cfg):
 
     if not kept:
         kept = rho.abs().mean(axis=1).sort_values(ascending=False).head(3).index.tolist()
-        print("    rule kept nothing -> fallback to top 3 by mean |rho|")
+        if verbose:
+            print("    rule kept nothing -> fallback to top 3 by mean |rho|")
 
     return kept
 
 
-def remove_duplicates(train, features, cfg):
+def remove_duplicates(X, y, groups, features, cfg):
     """Drop a feature if it is too correlated with a feature already kept.
     Features with a stronger link to RUL are looked at first."""
-    rho = spearman_per_bearing(train, features, cfg["TARGET"]).abs().mean(axis=1)
+    rho = spearman_per_bearing(X, y, groups, features).abs().mean(axis=1)
     ordered = rho.sort_values(ascending=False).index.tolist()
 
-    corr = train[features].corr(method="spearman").abs()
+    corr = X[features].corr(method="spearman").abs()
 
     kept = []
     for f in ordered:
@@ -214,6 +219,40 @@ def remove_duplicates(train, features, cfg):
             kept.append(f)
 
     return kept
+
+
+def select_features(X, y, groups, cfg, verbose=True):
+    """Feature selection used by every model. Only sees the rows it is given
+    (the training bearings of a round, or of an inner CV fold)."""
+    features = list(X.columns)
+
+    if cfg["SELECT_BY_RULE"]:
+        features = select_by_rule(X, y, groups, features, cfg, verbose)
+
+    if cfg["REMOVE_DUPLICATES"]:
+        features = remove_duplicates(X, y, groups, features, cfg)
+
+    return features
+
+
+class FeatureSelector(BaseEstimator, TransformerMixin):
+    """select_features() as a pipeline step, so that inside the SVR grid search
+    the selection is redone on the training part of EVERY inner fold (the
+    inner validation bearings never influence which features are used).
+
+    The bearing of each row is read from the DataFrame index (set in run()),
+    because the selection rules are computed per bearing."""
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg
+
+    def fit(self, X, y):
+        self.features_ = select_features(X, y, X.index.to_numpy(), self.cfg,
+                                         verbose=False)
+        return self
+
+    def transform(self, X):
+        return X[self.features_]
 
 
 def bearing_weights(train):
@@ -266,6 +305,7 @@ def make_svr(cfg):
     # Predictions are converted back to target units automatically.
     return TransformedTargetRegressor(
         regressor=make_pipeline(
+            FeatureSelector(cfg),
             StandardScaler(),
             SVR(kernel=cfg["SVR_KERNEL"], C=cfg["SVR_C"],
                 gamma=cfg["SVR_GAMMA"], epsilon=cfg["SVR_EPSILON"]),
@@ -278,6 +318,11 @@ def fit_svr(X_train, y_train, groups, w, cfg):
     """Fit SVR. If SVR_TUNE, choose C/gamma/epsilon by leave-one-TEST-out
     on the TRAINING bearings only (the test bearing is never seen), then refit
     on all training bearings with the best settings.
+
+    X_train must hold ALL candidate features with the bearing id as index:
+    the FeatureSelector step inside the model picks the features, separately
+    for every inner fold and once more on all training bearings for the final
+    fit (which gives the same features as the other models).
 
     `groups` must be the test run (test_group), not the bearing: T1_B3 and
     T1_B4 come from the same run, so splitting them across inner folds would
@@ -368,13 +413,8 @@ def run(settings=None):
         test_label = "+".join(r["test"])
 
         # --- choose features (training bearings only), same for all models ---
-        features = list(candidates)
-
-        if cfg["SELECT_BY_RULE"]:
-            features = select_by_rule(train, features, cfg)
-
-        if cfg["REMOVE_DUPLICATES"]:
-            features = remove_duplicates(train, features, cfg)
+        features = select_features(
+            train[candidates], train[target], train["bearing_id"], cfg)
 
         print(f"Test {test_label}: {len(features)} features -> {features}")
 
@@ -383,8 +423,14 @@ def run(settings=None):
         w = bearing_weights(train) if cfg["BEARING_WEIGHTS"] else None
 
         # --- fit all models on the same training data ---
+        # SVR: all candidates + bearing id as index; it selects features itself
+        # inside every inner CV fold (no leakage into the grid search).
+        X_train_svr = train[candidates].set_index(train["bearing_id"])
+        X_test_svr = test[candidates].set_index(test["bearing_id"])
         svr_model, svr_params[test_label] = fit_svr(
-            X_train, y_train, train["test_group"], w, cfg)
+            X_train_svr, y_train, train["test_group"], w, cfg)
+        svr_features = svr_model.regressor_[0].features_
+        assert svr_features == features, "SVR final features differ from the other models"
         models = {
             "Mean": MeanPredictor().fit(X_train, y_train, sample_weight=w),
             "Linear": fit_linear(X_train, y_train, w, cfg),
@@ -396,8 +442,12 @@ def run(settings=None):
 
         for model_name, model in models.items():
 
-            pred_test = model.predict(X_test)
-            pred_train = model.predict(X_train)
+            if model_name == "SVR":
+                pred_test = model.predict(X_test_svr)
+                pred_train = model.predict(X_train_svr)
+            else:
+                pred_test = model.predict(X_test)
+                pred_train = model.predict(X_train)
 
             if model_name in CLIPPED_MODELS and cfg["CLIP_PREDICTIONS"]:
                 pred_test = clip_target(pred_test, y_train)
@@ -453,10 +503,10 @@ def run(settings=None):
         # SVR has no feature_importances_ (RBF). Permutation importance = how much
         # test MAE gets worse when one feature is shuffled. Interpretation only.
         perm = permutation_importance(
-            models["SVR"], X_test, y_test,
+            models["SVR"], X_test_svr, y_test,
             scoring="neg_mean_absolute_error", n_repeats=10, random_state=42, n_jobs=-1,
         )
-        perm_imp = pd.Series(perm.importances_mean, index=features)
+        perm_imp = pd.Series(perm.importances_mean, index=candidates)[features]
         print("    SVR permutation importance (MAE increase):",
               perm_imp.sort_values(ascending=False).round(3).to_dict(), "\n")
 

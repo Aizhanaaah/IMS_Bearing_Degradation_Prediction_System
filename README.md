@@ -136,10 +136,10 @@ Random Forest is the best model so far, with good results on `T2_B1` (MAE ≈ 14
 
 ## Requirements
 
-Python 3.12 with:
+Python 3.12. Install the pinned package versions with:
 
 ```bash
-pip install numpy pandas scipy scikit-learn statsmodels matplotlib
+pip install -r requirements.txt
 ```
 
 ---

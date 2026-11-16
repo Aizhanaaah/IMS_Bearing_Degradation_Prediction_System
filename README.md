@@ -20,7 +20,7 @@ Each recording is a 1-second snapshot sampled at **20 kHz**. Shaft speed is 2000
 
 The last recordings of tests 2 and 3 read about 0.002 g on every channel, which means the sensors were already switched off after the failure. They are dropped everywhere (see `VALID_RECORDINGS` in `src/data_loader.py`).
 
-> **The raw data is not in this repository** (it is git-ignored). Download the IMS bearing dataset from the NASA Prognostics Center of Excellence data repository and extract it so the folder layout looks like this:
+> **The raw data is not in this repository** (it is git-ignored). Download the IMS bearing dataset ("4. Bearings") from the [NASA Prognostics Center of Excellence Data Set Repository](https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/) (direct download: [4. Bearings.zip](https://phm-datasets.s3.amazonaws.com/NASA/4.+Bearings.zip)) and extract it so the folder layout looks like this:
 >
 > ```
 > Data/

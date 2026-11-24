@@ -10,7 +10,7 @@ DATASETS = [
     "3rd_test",
 ]
 
-SAMPLING_FREQUENCY = 20_000  # Hz
+SAMPLING_FREQUENCY = 20_000
 
 BEARING_PARAMETERS = {
     "number_of_rolling_elements": 16,
@@ -106,7 +106,6 @@ def extract_features(
     recording_index=0,
     plot_path=None
 ):
-
 
     features = {
 
@@ -296,8 +295,6 @@ def plot_spectra(
     plot_path
 ):
 
-    """Save FFT spectra and mark theoretical fault frequencies."""
-
     if not plot_signals:
         return
 
@@ -377,13 +374,7 @@ def plot_spectra(
     plt.close(fig)
 
 
-# ============================================================
-# PROCESS ONE EXPERIMENT
-# ============================================================
-
 def process_dataset(dataset_name):
-
-    """Extract features from every recording in one IMS experiment."""
 
     folder = DATA_DIR / dataset_name
 
@@ -393,8 +384,6 @@ def process_dataset(dataset_name):
             f"Dataset folder not found: {folder}"
         )
 
-    # Filenames use fixed-width timestamps, so lexical sorting
-    # gives chronological order.
     files = sorted(
         file
         for file in folder.iterdir()
@@ -407,7 +396,6 @@ def process_dataset(dataset_name):
             f"No recording files found in {folder}"
         )
 
-    # Separate output folder for each experiment.
     output_dir = PROCESSED_DIR / dataset_name
 
     plot_dir = output_dir / "plots" / "fft_spectra"

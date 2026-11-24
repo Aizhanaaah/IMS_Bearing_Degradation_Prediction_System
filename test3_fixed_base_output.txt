@@ -1,0 +1,46 @@
+Experiment: test3_fixed_base
+Candidates: 9 features
+
+Test T1_B4: 9 features -> ['rms', 'peak_to_peak', 'skewness', 'kurtosis', 'spectral_entropy', 'BSF_H1_band_power', 'BPFI_H1_band_power', 'BPFO_H1_band_power', 'crest_factor']
+    SVR best params: {'C': 1, 'epsilon': 0.05, 'gamma': 0.1}  (inner CV MAE=127.794)
+    Mean          test MAE=169.142  R2=-36.215   | train MAE=138.037
+    Linear        test MAE=216.402  R2=-59.097   | train MAE=113.015
+    RandomForest  test MAE=84.867  R2=-10.908   | train MAE=65.437
+    SVR           test MAE=175.792  R2=-40.697   | train MAE=85.524
+    linear weights: {'rms': -115.321, 'kurtosis': -12.166, 'crest_factor': 3.525, 'spectral_entropy': 4.51, 'BSF_H1_band_power': 11.223, 'BPFI_H1_band_power': 17.195, 'BPFO_H1_band_power': 17.975, 'skewness': 19.932, 'peak_to_peak': 41.865}
+    RF importances: {'rms': 0.496, 'peak_to_peak': 0.192, 'spectral_entropy': 0.149, 'kurtosis': 0.063, 'skewness': 0.039, 'crest_factor': 0.023, 'BPFI_H1_band_power': 0.016, 'BSF_H1_band_power': 0.012, 'BPFO_H1_band_power': 0.011}
+    SVR support vectors: 3118/3496 (89%)
+    SVR permutation importance (MAE increase, h): {'skewness': 2.855, 'BPFO_H1_band_power': 0.154, 'BSF_H1_band_power': -0.057, 'BPFI_H1_band_power': -0.543, 'rms': -2.058, 'crest_factor': -2.895, 'spectral_entropy': -2.976, 'kurtosis': -3.58, 'peak_to_peak': -11.751} 
+
+Test T2_B1: 9 features -> ['rms', 'peak_to_peak', 'kurtosis', 'crest_factor', 'BPFI_H1_band_power', 'BSF_H1_band_power', 'BPFO_H1_band_power', 'spectral_entropy', 'skewness']
+    SVR best params: {'C': 0.01, 'epsilon': 0.05, 'gamma': 1}  (inner CV MAE=122.307)
+    Mean          test MAE=179.823  R2=-68.375   | train MAE=138.039
+    Linear        test MAE=127.415  R2=-41.539   | train MAE=117.579
+    RandomForest  test MAE=16.081  R2=-1.152   | train MAE=63.669
+    SVR           test MAE=55.983  R2=-7.605   | train MAE=101.108
+    linear weights: {'rms': -111.289, 'crest_factor': -69.856, 'BPFO_H1_band_power': -15.086, 'BSF_H1_band_power': -10.629, 'spectral_entropy': -2.789, 'BPFI_H1_band_power': -0.366, 'skewness': 10.383, 'kurtosis': 19.956, 'peak_to_peak': 89.862}
+    RF importances: {'rms': 0.546, 'peak_to_peak': 0.177, 'spectral_entropy': 0.077, 'BPFI_H1_band_power': 0.068, 'kurtosis': 0.055, 'crest_factor': 0.026, 'skewness': 0.021, 'BSF_H1_band_power': 0.017, 'BPFO_H1_band_power': 0.014}
+    SVR support vectors: 3570/3846 (93%)
+    SVR permutation importance (MAE increase, h): {'crest_factor': -0.562, 'BSF_H1_band_power': -0.716, 'BPFI_H1_band_power': -0.735, 'BPFO_H1_band_power': -0.935, 'skewness': -5.396, 'peak_to_peak': -7.723, 'kurtosis': -8.213, 'rms': -9.885, 'spectral_entropy': -10.161} 
+
+Test T3_B3: 9 features -> ['peak_to_peak', 'rms', 'kurtosis', 'spectral_entropy', 'crest_factor', 'BPFO_H1_band_power', 'BSF_H1_band_power', 'BPFI_H1_band_power', 'skewness']
+    SVR best params: {'C': 0.1, 'epsilon': 1.0, 'gamma': 0.01}  (inner CV MAE=21.020)
+    Mean          test MAE=215.767  R2=-2.027   | train MAE=21.755
+    Linear        test MAE=206.523  R2=-1.839   | train MAE=17.238
+    RandomForest  test MAE=208.755  R2=-1.917   | train MAE=8.354
+    SVR           test MAE=211.109  R2=-1.934   | train MAE=18.626
+    linear weights: {'rms': -8.64, 'peak_to_peak': -1.224, 'kurtosis': -0.85, 'BPFO_H1_band_power': -0.433, 'skewness': 0.47, 'BPFI_H1_band_power': 0.836, 'crest_factor': 2.212, 'BSF_H1_band_power': 2.623, 'spectral_entropy': 8.227}
+    RF importances: {'rms': 0.351, 'spectral_entropy': 0.168, 'kurtosis': 0.152, 'peak_to_peak': 0.137, 'crest_factor': 0.096, 'BPFO_H1_band_power': 0.028, 'BSF_H1_band_power': 0.027, 'BPFI_H1_band_power': 0.023, 'skewness': 0.017}
+    SVR support vectors: 304/1254 (24%)
+    SVR permutation importance (MAE increase, h): {'rms': 0.625, 'spectral_entropy': 0.44, 'peak_to_peak': 0.293, 'skewness': 0.121, 'kurtosis': 0.037, 'BPFI_H1_band_power': 0.03, 'BPFO_H1_band_power': 0.005, 'BSF_H1_band_power': -0.012, 'crest_factor': -0.012} 
+
+Average over the 3 test bearings:
+                  mae     rmse      r2  train_mae
+model                                            
+Linear        183.447  203.145 -34.158     82.611
+Mean          188.244  203.484 -35.539     99.277
+RandomForest  103.234  127.344  -4.659     45.820
+SVR           147.628  166.389 -16.745     68.420
+
+Logged to: C:\Users\ASUS\Desktop\THESIS\ThesisWork\Data\processed\experiment_log_v2.csv
+Plots saved in: C:\Users\ASUS\Desktop\THESIS\ThesisWork\Data\processed\plots\experiments\test3_fixed_base

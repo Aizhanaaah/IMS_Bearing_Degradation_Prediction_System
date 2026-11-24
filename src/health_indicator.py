@@ -117,7 +117,6 @@ def compare_and_select_features(
 
     eligible = results[results["eligible"]]
 
-    # Select the top N features independently per channel.
     for channel, group in eligible.groupby(
         "channel",
         sort=False
@@ -207,7 +206,6 @@ def construct_health_indicator(
         minimum = np.nanmin(values)
         maximum = np.nanmax(values)
 
-        # Constant features cannot indicate degradation.
         if np.isclose(maximum, minimum):
             print(
                 f"  SKIP {name}: constant "
@@ -215,7 +213,6 @@ def construct_health_indicator(
             )
             continue
 
-        # Min-max normalization.
         normalized = (
             values - minimum
         ) / (
@@ -237,7 +234,6 @@ def construct_health_indicator(
             print(f"  SKIP {name}: correlation is NaN")
             continue
 
-        # Align direction with the observed temporal trend.
         if correlation < 0:
             normalized = 1.0 - normalized
 
@@ -361,7 +357,6 @@ def process_dataset(dataset_name):
         exist_ok=True
     )
 
-    # Check input files.
     for file_path in [quality_file, features_file]:
 
         if not file_path.exists():
@@ -369,7 +364,6 @@ def process_dataset(dataset_name):
                 f"Required file not found: {file_path}"
             )
 
-    # Load feature-quality results and extracted features.
     quality = pd.read_csv(quality_file)
     features = load_features(dataset_name)
 

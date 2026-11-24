@@ -24,31 +24,16 @@ CHANNEL_NAMES = {
     ]
 }
 
-# Number of VALID recordings per test (all downstream steps use only these).
-# 1st test: all 2156 files are real measurements.
-# 2nd test: 984 files, but the last two (2004.02.19.06.12.39 and .06.22.39)
-#   read ~0.002 g on every channel, i.e. the sensors were already switched
-#   off after the failure. They are not measurements -> 982 valid.
-# 3rd test: 6324 files (the readme says 4448, but bearing 3 only degrades in
-#   the last ~20 h, so the whole folder is used). The very last file reads
-#   ~0.002 g on every channel (sensors off) -> 6323 valid.
 VALID_RECORDINGS = {
     "1st_test": 2156,
     "2nd_test": 982,
     "3rd_test": 6323,
 }
 
-# A recording whose LOUDEST channel has an RMS below this value is treated as
-# "sensors off". Real recordings never go below ~0.07 g, dead ones are ~0.002 g.
 SENSOR_OFF_RMS = 0.02
 
 
 def load_features(dataset_name):
-    """
-    Load features_all.csv (written by feature_extraction.py), keep only the
-    valid recordings (VALID_RECORDINGS) and check that no sensor-off
-    recording is left in the table.
-    """
 
     input_file = PROCESSED_DIR / dataset_name / "features_all.csv"
 
@@ -97,8 +82,6 @@ def get_recording_files(dataset_name):
             f"Dataset folder not found: {folder}"
         )
 
-    # Fixed-width timestamp names: sorting by name = chronological order.
-    # (iterdir() itself does not guarantee any order.)
     files = sorted(
         (f for f in folder.iterdir() if f.is_file()),
         key=lambda f: f.name

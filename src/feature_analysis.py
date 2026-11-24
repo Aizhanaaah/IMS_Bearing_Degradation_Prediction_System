@@ -47,7 +47,6 @@ CHANNEL_GROUPS = {
 
 def load_feature_table(dataset_name):
 
-    # Valid recordings only (sensor-off files at the end are dropped).
     features = load_features(dataset_name)
 
     if "recording" not in features.columns:
@@ -183,7 +182,6 @@ def plot_frequency_spectra(
                     d=1 / SAMPLING_FREQUENCY
                 )
 
-                # Relative amplitude spectrum.
                 magnitude = (
                     np.abs(fft_values) / len(signal)
                 )
@@ -256,8 +254,6 @@ def analyze_dataset(dataset_name):
     )
 
     features = load_feature_table(dataset_name)
-    # Same valid range as the feature table, so the "last" spectrum is the
-    # last real measurement and not a sensor-off file.
     files = get_recording_files(dataset_name)[
         :VALID_RECORDINGS[dataset_name]
     ]

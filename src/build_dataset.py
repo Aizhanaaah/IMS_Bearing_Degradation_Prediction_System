@@ -1,23 +1,3 @@
-"""
-build_dataset.py
-
-Builds ONE unified table for the four failed bearings
-(T1_B3, T1_B4, T2_B1, T3_B3) so that the same model can use all of them:
-
-  1. Channel-independent feature names (Bx_3_rms and By_3_rms -> rms).
-     Two-channel bearings are averaged, one-channel bearings are used as is.
-  2. Parameter columns (*_target_hz, *_theoretical_hz, *_bins_in_band) are
-     removed. They are fixed numbers, not measurements.
-  3. Features that are constant or contain NaN/inf in any bearing are removed.
-  4. Optional per-bearing baseline normalization (z-score against the healthy
-     baseline window, the same window the FPT detector uses). Causal: only the
-     early part of each run is used.
-  5. RUL labels and the FPT stage flag from rul_labels.py.
-  6. Fold definitions for the leakage-free protocol (see make_folds).
-
-Run rul_labels.py first (this script imports its functions).
-"""
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -32,10 +12,6 @@ from rul_labels import (
     add_fpt_labels,
 )
 
-
-# --------------------------------------------------
-# 1. Configuration
-# --------------------------------------------------
 
 EXCLUDE_SUFFIXES = (
     "_target_hz",
@@ -61,17 +37,7 @@ META_COLUMNS = [
 ]
 
 
-# --------------------------------------------------
-# 2. Channel-independent feature table
-# --------------------------------------------------
-
 def common_feature_table(f, channels):
-    """
-    Strip the channel prefix and average over the bearing's channels.
-
-    Bx_3_rms, By_3_rms -> rms   (mean of the two channels)
-    B3_rms             -> rms
-    """
 
     per_channel = {}
 
@@ -84,7 +50,6 @@ def common_feature_table(f, channels):
             for column in f.columns
             if column.startswith(prefix)
         }
-
     names = set.intersection(
         *[set(mapping) for mapping in per_channel.values()]
     )
@@ -111,17 +76,7 @@ def common_feature_table(f, channels):
     return pd.DataFrame(table)
 
 
-# --------------------------------------------------
-# 3. Baseline normalization (causal)
-# --------------------------------------------------
-
 def baseline_zscore(features, start, end):
-    """
-    z = (x - mean_baseline) / std_baseline, using only the healthy
-    baseline window [start, end) of the SAME bearing.
-
-    The std has a small floor (0.1% of |mean|) to avoid dividing by ~0.
-    """
 
     baseline = features.iloc[start:end]
 
@@ -134,21 +89,7 @@ def baseline_zscore(features, start, end):
     return (features - mu) / sigma
 
 
-# --------------------------------------------------
-# 4. Fold definitions
-# --------------------------------------------------
-
 def make_folds(meta):
-    """
-    Leave-one-TEST-out (leakage-free).
-
-    In every fold, all bearings of one test are held out together and the
-    model is trained only on bearings from the OTHER tests. T1_B3 and T1_B4
-    come from the same run, so they always go out together.
-
-    meta: DataFrame with columns bearing_id and test_group.
-    """
-
     ids = (
         meta[["bearing_id", "test_group"]]
         .drop_duplicates()
@@ -170,10 +111,6 @@ def make_folds(meta):
 
     return folds
 
-
-# --------------------------------------------------
-# 5. Build the dataset
-# --------------------------------------------------
 
 def build():
 
@@ -223,7 +160,6 @@ def build():
             "Fix the FPT step first."
         )
 
-    # Keep only features that are valid in EVERY bearing.
     common = set.intersection(*[set(b["features"].columns) for b in bearings])
 
     dropped = {}
@@ -284,17 +220,7 @@ def build():
     return z_df
 
 
-# --------------------------------------------------
-# 5b. Label verification (checklist 3.4)
-# --------------------------------------------------
-
 def verify_labels(df):
-    """
-    Checks that the labels behave as defined and saves an overview plot:
-      - rul_hours decreases and ends at 0
-      - rul_norm_fpt (after FPT) goes from 1 to 0 without NaN
-      - rul_piecewise_hours is flat before FPT
-    """
 
     all_ok = True
 
@@ -343,10 +269,6 @@ def verify_labels(df):
     print(f"  Label plot saved: {LABEL_PLOT}")
     print("  LABELS OK" if all_ok else "  LABEL PROBLEM FOUND, see above")
 
-
-# --------------------------------------------------
-# 6. Main
-# --------------------------------------------------
 
 def main():
 

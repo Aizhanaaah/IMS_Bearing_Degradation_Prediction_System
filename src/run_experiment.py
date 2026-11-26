@@ -52,7 +52,10 @@ def main(argv):
 
     per_bearing = res.pivot_table(
         index=["experiment", "model"], columns="test_bearing", values="mae_hours")
-    per_bearing["avg"] = per_bearing.mean(axis=1)
+    bearing_cols = list(per_bearing.columns)
+    per_bearing["avg"] = per_bearing[bearing_cols].mean(axis=1)
+    per_bearing["std"] = per_bearing[bearing_cols].std(axis=1)
+    per_bearing["max"] = per_bearing[bearing_cols].max(axis=1)
 
     print(f"\n{'=' * 60}\nComparison: test MAE in hours (lower is better)\n")
     print(per_bearing.round(1).to_string())

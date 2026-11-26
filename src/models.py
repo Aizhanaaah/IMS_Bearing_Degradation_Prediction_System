@@ -396,23 +396,52 @@ def run(settings=None):
         predictions.append(pd.DataFrame({
             "test_bearing": test["bearing_id"].values,
             "hours": test["hours_from_start"].values,
+            # 0 at the FPT (start of degradation), 1 at failure.
+            "progress": 1.0 - test["rul_hours"].values / test["rul_at_fpt"].values,
             "true": y_test,
             **round_preds,
         }))
 
     res = pd.DataFrame(results)
     res.insert(0, "experiment", name)
-    summary = res.groupby("model")[["mae", "rmse", "r2", "mae_hours", "train_mae"]].mean()
+    metric_cols = ["mae", "rmse", "r2", "mae_hours", "train_mae"]
+    grouped = res.groupby("model")[metric_cols]
+    summary = grouped.mean()
+    spread = grouped.std()
+    # Worst bearing per metric: highest error, but lowest R2.
+    worst = grouped.max()
+    worst["r2"] = grouped.min()["r2"]
+    # Which bearing gives each model its highest test MAE.
+    worst["worst_bearing"] = (
+        res.loc[res.groupby("model")["mae"].idxmax()].set_index("model")["test_bearing"])
 
-    print(f"Average over the {res['test_bearing'].nunique()} test bearings:")
+    # A model that is no better than predicting the training mean on a bearing
+    # has learned nothing useful for that bearing.
+    mean_mae = res[res["model"] == "Mean"].set_index("test_bearing")["mae"]
+    res["beats_mean"] = res["mae"] < res["test_bearing"].map(mean_mae)
+
+    n_bearings = res["test_bearing"].nunique()
+    print(f"Average over the {n_bearings} test bearings:")
     print(summary.round(3).to_string())
-    write_log(cfg, res, summary, svr_params)
+    print(f"\nStd across the {n_bearings} test bearings:")
+    print(spread.round(3).to_string())
+    print("\nWorst test bearing (max error, min R2; worst_bearing = highest MAE):")
+    print(worst.round(3).to_string())
+
+    losers = res[(res["model"] != "Mean") & ~res["beats_mean"]]
+    print("\nBearings where a model is no better than the Mean baseline (test MAE):")
+    if losers.empty:
+        print("    none")
+    for _, line in losers.iterrows():
+        print(f"    {line['model']:13s} {line['test_bearing']}  "
+              f"MAE={line['mae']:.3f}  vs Mean={mean_mae[line['test_bearing']]:.3f}")
+    write_log(cfg, res, summary, spread, worst, svr_params)
     save_plots(cfg, predictions, list(models))
 
     return res
 
 
-def write_log(cfg, res, summary, svr_params):
+def write_log(cfg, res, summary, spread, worst, svr_params):
 
     row = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -434,9 +463,24 @@ def write_log(cfg, res, summary, svr_params):
     for _, line in res.iterrows():
         row[f"mae_{line['model']}_{line['test_bearing']}"] = round(line["mae"], 4)
         row[f"maeh_{line['model']}_{line['test_bearing']}"] = round(line["mae_hours"], 4)
+        row[f"rmse_{line['model']}_{line['test_bearing']}"] = round(line["rmse"], 4)
+        row[f"r2_{line['model']}_{line['test_bearing']}"] = round(line["r2"], 4)
     for model_name in summary.index:
         row[f"mae_{model_name}_avg"] = round(summary.loc[model_name, "mae"], 4)
         row[f"maeh_{model_name}_avg"] = round(summary.loc[model_name, "mae_hours"], 4)
+        row[f"rmse_{model_name}_avg"] = round(summary.loc[model_name, "rmse"], 4)
+        row[f"r2_{model_name}_avg"] = round(summary.loc[model_name, "r2"], 4)
+        for key, col in [("mae", "mae"), ("maeh", "mae_hours"), ("rmse", "rmse"), ("r2", "r2")]:
+            row[f"{key}_{model_name}_std"] = round(spread.loc[model_name, col], 4)
+        row[f"mae_{model_name}_max"] = round(worst.loc[model_name, "mae"], 4)
+        row[f"maeh_{model_name}_max"] = round(worst.loc[model_name, "mae_hours"], 4)
+        row[f"rmse_{model_name}_max"] = round(worst.loc[model_name, "rmse"], 4)
+        row[f"r2_{model_name}_min"] = round(worst.loc[model_name, "r2"], 4)
+        row[f"worst_{model_name}"] = worst.loc[model_name, "worst_bearing"]
+        if model_name != "Mean":
+            m = res[res["model"] == model_name]
+            row[f"no_better_than_mean_{model_name}"] = "+".join(
+                m.loc[~m["beats_mean"], "test_bearing"])
 
     new_row = pd.DataFrame([row])
     if LOG_FILE.exists():
@@ -449,19 +493,55 @@ def save_plots(cfg, predictions, model_names):
     plot_dir = PROCESSED / "plots" / "experiments" / cfg["EXPERIMENT_NAME"]
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    for bearing, p in pd.concat(predictions).groupby("test_bearing"):
+    all_preds = pd.concat(predictions)
+    name = cfg["EXPERIMENT_NAME"]
+    target = cfg["TARGET"]
+
+    for bearing, p in all_preds.groupby("test_bearing"):
         plt.figure(figsize=(10, 4))
         plt.plot(p["hours"], p["true"], "k", linewidth=2, label="true")
         for model_name in model_names:
             plt.plot(p["hours"], p[model_name], linewidth=1, label=model_name)
-        plt.title(f"{bearing} | {cfg['EXPERIMENT_NAME']}")
+        plt.title(f"{bearing} | {name}")
         plt.xlabel("hours from start")
-        plt.ylabel(cfg["TARGET"])
+        plt.ylabel(target)
         plt.legend()
         plt.grid(alpha=0.3)
         plt.tight_layout()
         plt.savefig(plot_dir / f"{bearing}.png", dpi=120)
         plt.close()
+
+        # Signed error over the degradation sequence (positive = overestimates RUL).
+        plt.figure(figsize=(10, 4))
+        plt.axhline(0, color="k", linewidth=1)
+        for model_name in model_names:
+            plt.plot(p["hours"], p[model_name] - p["true"], linewidth=1, label=model_name)
+        plt.title(f"{bearing} | {name} | error (predicted - true)")
+        plt.xlabel("hours from start")
+        plt.ylabel(f"error in {target}")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(plot_dir / f"{bearing}_error.png", dpi=120)
+        plt.close()
+
+    # Absolute error against degradation progress, all test bearings overlaid.
+    fig, axes = plt.subplots(len(model_names), 1, figsize=(10, 2.6 * len(model_names)),
+                             sharex=True, sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, model_name in zip(axes, model_names):
+        for bearing, p in all_preds.groupby("test_bearing"):
+            ax.plot(p["progress"], (p[model_name] - p["true"]).abs(),
+                    linewidth=1, label=bearing)
+        ax.set_title(model_name)
+        ax.set_ylabel(f"|error| in {target}")
+        ax.grid(alpha=0.3)
+    axes[0].legend(title="test bearing", fontsize=8)
+    axes[-1].set_xlabel("degradation progress (0 = FPT, 1 = failure)")
+    fig.suptitle(f"{name} | absolute error vs degradation progress")
+    fig.tight_layout()
+    fig.savefig(plot_dir / "abs_error_vs_progress.png", dpi=120)
+    plt.close(fig)
 
     print(f"Plots saved in: {plot_dir}")
 

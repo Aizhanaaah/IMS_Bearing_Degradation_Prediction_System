@@ -24,6 +24,9 @@ EXPERIMENTS = [
     {"EXPERIMENT_NAME": "smooth_5",  "SMOOTH_WINDOW": 5},
     {"EXPERIMENT_NAME": "smooth_10", "SMOOTH_WINDOW": 10},
     {"EXPERIMENT_NAME": "smooth_20", "SMOOTH_WINDOW": 20}, 
+
+    {"EXPERIMENT_NAME": "time_features",
+     "FEATURE_SET": "time"},
 ]
 
 

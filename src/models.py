@@ -77,6 +77,8 @@ PHYSICS_SET = [
     "spectral_entropy",
     "BPFI_H1_band_power", "BPFO_H1_band_power", "BSF_H1_band_power",
 ]
+TIME_SET = ["rms", "kurtosis", "crest_factor", "peak_to_peak", "skewness"]
+FEATURE_SETS = ("physics", "time", "all")
 
 
 CLIPPED_MODELS = {"Linear", "SVR"}
@@ -93,8 +95,9 @@ def load_data(cfg):
 def prepare_features(df, cfg):
 
     all_features = [c for c in df.columns if c not in META + ["rul_at_fpt"]]
-    candidates = (list(PHYSICS_SET) if cfg["FEATURE_SET"] == "physics"
-                  else list(all_features))
+    candidates = {"physics": list(PHYSICS_SET),
+                  "time": list(TIME_SET),
+                  "all": list(all_features)}[cfg["FEATURE_SET"]]
 
     if cfg["SMOOTH_WINDOW"] > 1:
         w = cfg["SMOOTH_WINDOW"]
@@ -285,6 +288,8 @@ def run(settings=None):
     cfg = {**DEFAULT_SETTINGS, **settings}
     if cfg["TARGET"] not in TARGETS:
         raise ValueError(f"TARGET must be one of {TARGETS}")
+    if cfg["FEATURE_SET"] not in FEATURE_SETS:
+        raise ValueError(f"FEATURE_SET must be one of {FEATURE_SETS}")
 
     target = cfg["TARGET"]
     normalized = target == "rul_norm_fpt"

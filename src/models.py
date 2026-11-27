@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -67,6 +68,7 @@ DEFAULT_SETTINGS = {
 
 PROCESSED = Path(__file__).resolve().parent.parent / "Data" / "processed"
 LOG_FILE = PROCESSED / "experiment_log_v2.csv"
+REDUNDANCY_FILE = PROCESSED / "feature_redundancy_log.csv"
 TARGETS = ("rul_piecewise_hours", "rul_norm_fpt")
 META = [
     "bearing_id", "test_group", "recording", "hours_from_start", "stage",
@@ -147,7 +149,7 @@ def select_by_rule(X, y, groups, features, cfg, verbose=True):
     return kept
 
 
-def remove_duplicates(X, y, groups, features, cfg):
+def remove_duplicates(X, y, groups, features, cfg, report=None):
 
     rho = spearman_per_bearing(X, y, groups, features).abs().mean(axis=1)
     ordered = rho.sort_values(ascending=False).index.tolist()
@@ -156,13 +158,23 @@ def remove_duplicates(X, y, groups, features, cfg):
 
     kept = []
     for f in ordered:
-        if all(corr.loc[f, k] < cfg["DUPLICATE_THRESHOLD"] for k in kept):
+        # The kept feature most similar to f, for the redundancy report.
+        match = max(kept, key=lambda k: corr.loc[f, k], default=None)
+        dropped = not all(corr.loc[f, k] < cfg["DUPLICATE_THRESHOLD"] for k in kept)
+        if not dropped:
             kept.append(f)
+        if report is not None:
+            report.append({
+                "feature": f, "status": "dropped" if dropped else "kept",
+                "mean_abs_rho_target": rho[f],
+                "most_similar_kept": match,
+                "abs_spearman_with_it": corr.loc[f, match] if match else np.nan,
+            })
 
     return kept
 
 
-def select_features(X, y, groups, cfg, verbose=True):
+def select_features(X, y, groups, cfg, verbose=True, report=None):
 
     features = list(X.columns)
 
@@ -170,7 +182,7 @@ def select_features(X, y, groups, cfg, verbose=True):
         features = select_by_rule(X, y, groups, features, cfg, verbose)
 
     if cfg["REMOVE_DUPLICATES"]:
-        features = remove_duplicates(X, y, groups, features, cfg)
+        features = remove_duplicates(X, y, groups, features, cfg, report)
 
     return features
 
@@ -311,6 +323,10 @@ def run(settings=None):
     results = []
     predictions = []
     svr_params = {}
+    timings = []
+    redundancy = []
+    n_features = {}
+    run_start = perf_counter()
 
     for r in rounds:
 
@@ -319,10 +335,18 @@ def run(settings=None):
         assert not set(r["test"]) & set(train["bearing_id"]), "LEAKAGE!"
         test_label = "+".join(r["test"])
 
+        dup_report = []
         features = select_features(
-            train[candidates], train[target], train["bearing_id"], cfg)
+            train[candidates], train[target], train["bearing_id"], cfg,
+            report=dup_report)
+        redundancy += [{"round": test_label, **d} for d in dup_report]
+        n_features[test_label] = len(features)
 
         print(f"Test {test_label}: {len(features)} features -> {features}")
+        for d in dup_report:
+            if d["status"] == "dropped":
+                print(f"    dropped {d['feature']} (|rho|={d['abs_spearman_with_it']:.2f}"
+                      f" with {d['most_similar_kept']})")
 
         X_train, y_train = train[features], train[target]
         X_test, y_test = test[features], test[target].values
@@ -330,27 +354,43 @@ def run(settings=None):
 
         X_train_svr = train[candidates].set_index(train["bearing_id"])
         X_test_svr = test[candidates].set_index(test["bearing_id"])
+        fit_seconds = {}
+        start = perf_counter()
         svr_model, svr_params[test_label] = fit_svr(
             X_train_svr, y_train, train["test_group"], w, cfg)
+        # Includes the inner grid search when SVR_TUNE is on.
+        fit_seconds["SVR"] = perf_counter() - start
         svr_features = svr_model.regressor_[0].features_
         assert svr_features == features, "SVR final features differ from the other models"
-        models = {
-            "Mean": MeanPredictor().fit(X_train, y_train, sample_weight=w),
-            "Linear": fit_linear(X_train, y_train, w, cfg),
-            "RandomForest": make_forest(cfg).fit(X_train, y_train, sample_weight=w),
-            "SVR": svr_model,
+        builders = {
+            "Mean": lambda: MeanPredictor().fit(X_train, y_train, sample_weight=w),
+            "Linear": lambda: fit_linear(X_train, y_train, w, cfg),
+            "RandomForest": lambda: make_forest(cfg).fit(X_train, y_train, sample_weight=w),
         }
+        models = {}
+        for model_name, build in builders.items():
+            start = perf_counter()
+            models[model_name] = build()
+            fit_seconds[model_name] = perf_counter() - start
+        models["SVR"] = svr_model
 
         round_preds = {}
 
         for model_name, model in models.items():
 
-            if model_name == "SVR":
-                pred_test = model.predict(X_test_svr)
-                pred_train = model.predict(X_train_svr)
-            else:
-                pred_test = model.predict(X_test)
-                pred_train = model.predict(X_train)
+            X_tr, X_te = ((X_train_svr, X_test_svr) if model_name == "SVR"
+                          else (X_train, X_test))
+            start = perf_counter()
+            pred_test = model.predict(X_te)
+            predict_seconds = perf_counter() - start
+            pred_train = model.predict(X_tr)
+
+            timings.append({
+                "round": test_label, "model": model_name,
+                "fit_seconds": fit_seconds[model_name],
+                "predict_seconds": predict_seconds,
+                "n_train": len(X_tr), "n_test": len(X_te),
+            })
 
             if model_name in CLIPPED_MODELS and cfg["CLIP_PREDICTIONS"]:
                 pred_test = clip_target(pred_test, y_train)
@@ -442,17 +482,41 @@ def run(settings=None):
     for _, line in losers.iterrows():
         print(f"    {line['model']:13s} {line['test_bearing']}  "
               f"MAE={line['mae']:.3f}  vs Mean={mean_mae[line['test_bearing']]:.3f}")
-    write_log(cfg, res, summary, spread, worst, svr_params)
+    run_seconds = perf_counter() - run_start
+    cost = pd.DataFrame(timings).groupby("model", sort=False)[
+        ["fit_seconds", "predict_seconds"]].sum()
+    print(f"\nComputational cost (seconds, summed over the {len(rounds)} rounds):")
+    print(cost.round(3).to_string())
+    print(f"Total run time: {run_seconds:.1f} s")
+
+    write_log(cfg, res, summary, spread, worst, svr_params,
+              cost, run_seconds, n_features)
+    write_redundancy(cfg, redundancy)
     save_plots(cfg, predictions, list(models))
 
     return res
 
 
-def write_log(cfg, res, summary, spread, worst, svr_params):
+def write_redundancy(cfg, redundancy):
+
+    if not redundancy:
+        return
+    rows = pd.DataFrame(redundancy)
+    rows.insert(0, "experiment", cfg["EXPERIMENT_NAME"])
+    rows.insert(0, "time", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    rows["threshold"] = cfg["DUPLICATE_THRESHOLD"]
+    if REDUNDANCY_FILE.exists():
+        rows = pd.concat([pd.read_csv(REDUNDANCY_FILE), rows], ignore_index=True)
+    rows.to_csv(REDUNDANCY_FILE, index=False, float_format="%.4f")
+
+
+def write_log(cfg, res, summary, spread, worst, svr_params,
+              cost, run_seconds, n_features):
 
     row = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "experiment": cfg["EXPERIMENT_NAME"],
+        "run_seconds": round(run_seconds, 2),
         "dataset": cfg["DATASET"], "feature_set": cfg["FEATURE_SET"],
         "target": cfg["TARGET"], "bearing_weights": cfg["BEARING_WEIGHTS"],
         "remove_duplicates": cfg["REMOVE_DUPLICATES"],
@@ -464,6 +528,11 @@ def write_log(cfg, res, summary, spread, worst, svr_params):
         "trees": cfg["NUMBER_OF_TREES"], "min_samples_leaf": cfg["MIN_SAMPLES_LEAF"],
         "svr_kernel": cfg["SVR_KERNEL"], "svr_tuned": cfg["SVR_TUNE"],
     }
+    for model_name in cost.index:
+        row[f"fit_s_{model_name}"] = round(cost.loc[model_name, "fit_seconds"], 4)
+        row[f"predict_s_{model_name}"] = round(cost.loc[model_name, "predict_seconds"], 4)
+    for round_label, n in n_features.items():
+        row[f"n_features_{round_label}"] = n
     for round_label, p in svr_params.items():
         for k, v in p.items():
             row[f"svr_{k}_{round_label}"] = v

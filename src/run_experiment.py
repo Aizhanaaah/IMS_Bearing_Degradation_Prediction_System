@@ -2,7 +2,9 @@ import sys
 
 import pandas as pd
 
-from models import run
+from health_indicator import construct_health_indicator
+from models import DEFAULT_SETTINGS, load_data, prepare_features, run
+from validation import evaluate_indicator
 
 
 EXPERIMENTS = [
@@ -18,7 +20,29 @@ EXPERIMENTS = [
     {"EXPERIMENT_NAME": "norm_target_weights",
      "TARGET": "rul_norm_fpt",
      "BEARING_WEIGHTS": True},
+
+    {"EXPERIMENT_NAME": "smooth_5",  "SMOOTH_WINDOW": 5},
+    {"EXPERIMENT_NAME": "smooth_10", "SMOOTH_WINDOW": 10},
+    {"EXPERIMENT_NAME": "smooth_20", "SMOOTH_WINDOW": 20}, 
 ]
+
+
+def hi_behaviour(settings):
+    # HI built from the model inputs of each bearing (after smoothing etc.),
+    # scored like validation.py does.
+    cfg = {**DEFAULT_SETTINGS, **settings}
+    df = load_data(cfg)
+    features = prepare_features(df, cfg)
+
+    rows = []
+    for bearing, group in df.groupby("bearing_id"):
+        hi, _ = construct_health_indicator(group[features].reset_index(drop=True), features)
+        scores = evaluate_indicator(hi["HI_raw"].to_numpy())
+        rows.append({"experiment": cfg["EXPERIMENT_NAME"], "test_bearing": bearing,
+                     "monotonicity": scores["monotonicity"],
+                     "spearman": scores["spearman_rho"],
+                     "roughness": scores["normalized_roughness"]})
+    return pd.DataFrame(rows)
 
 
 def main(argv):
@@ -40,6 +64,7 @@ def main(argv):
                 if not names or exp["EXPERIMENT_NAME"] in names]
 
     all_results = []
+    all_hi = []
 
     for exp in selected:
         settings = dict(exp)
@@ -47,6 +72,7 @@ def main(argv):
             settings["SVR_TUNE"] = False
             settings["EXPERIMENT_NAME"] += "_quick"
         all_results.append(run(settings))
+        all_hi.append(hi_behaviour(settings))
 
     res = pd.concat(all_results, ignore_index=True)
 
@@ -59,6 +85,11 @@ def main(argv):
 
     print(f"\n{'=' * 60}\nComparison: test MAE in hours (lower is better)\n")
     print(per_bearing.round(1).to_string())
+
+    hi = pd.concat(all_hi).groupby("experiment").mean(numeric_only=True)
+    mae = per_bearing["avg"].unstack("model").add_prefix("MAE_")
+    print(f"\n{'=' * 60}\nHI behaviour of the model inputs vs. average test MAE (h)\n")
+    print(hi.join(mae).round(3).to_string())
 
     best = per_bearing["avg"].idxmin()
     print(f"\nBest average: {best[1]} in '{best[0]}' "

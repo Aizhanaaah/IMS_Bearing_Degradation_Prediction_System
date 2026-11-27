@@ -50,7 +50,6 @@ ThesisWork/
 │   └── exploratory_analysis.ipynb
 ├── literature/
 │   └── paper_comparison.xlsx  # Comparison of related work
-├── results/                   # figures/ and metrics/
 ├── tests/                     # (placeholders)
 └── Data/                      # Raw + processed data (not tracked)
 ```
